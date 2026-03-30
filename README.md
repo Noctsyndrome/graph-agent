@@ -80,6 +80,25 @@ streamlit run ui/app.py
 
 默认读取 `KGQA_API_BASE_URL`，未配置时访问 `http://localhost:8000`。
 
+如果希望同时启动本地 API 和 Streamlit，并把运行日志统一写入 `logs/` 目录，推荐使用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_local_services.ps1
+```
+
+停止本地服务：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\stop_local_services.ps1
+```
+
+运行日志会写入：
+
+- `logs/api_*.out.log`
+- `logs/api_*.err.log`
+- `logs/ui_*.out.log`
+- `logs/ui_*.err.log`
+
 ## 8. Docker Compose 一键运行
 
 如果希望 API 和 UI 也放进容器：
@@ -109,4 +128,3 @@ python eval/run_eval.py
 - 若配置了 LLM，则会优先用于回答润色与复杂多步规划回退
 - 无结果时统一返回“图谱中未找到相关信息”
 - 写操作 Cypher 会被拒绝执行
-
