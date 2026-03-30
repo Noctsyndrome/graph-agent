@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kg-qa-poc"
+version = "0.1.0"
+description = "Knowledge-graph augmented QA proof of concept"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "fastapi>=0.116.0",
+  "uvicorn[standard]>=0.35.0",
+  "neo4j>=5.28.0",
+  "pydantic>=2.11.0",
+  "pydantic-settings>=2.10.1",
+  "pyyaml>=6.0.2",
+  "httpx>=0.28.1",
+  "streamlit>=1.45.0",
+  "pytest>=8.4.0",
+  "python-dotenv>=1.1.0",
+]
+
+[project.scripts]
+kgqa = "kgqa.cli:main"
+kgqa-api = "kgqa.api:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

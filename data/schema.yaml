@@ -1,0 +1,110 @@
+dataset: kgqa_poc
+description: 知识图谱智能问答演示数据集
+entities:
+  - name: Customer
+    description: 客户信息
+    properties:
+      id: string
+      name: string
+      industry: string
+      region: string
+      level: string
+      dataset: string
+    filterable_fields: [name, industry, region, level]
+  - name: Project
+    description: 项目信息
+    properties:
+      id: string
+      name: string
+      type: string
+      city: string
+      start_date: date
+      status: string
+      area_sqm: number
+      dataset: string
+    filterable_fields: [name, type, city, start_date, status]
+  - name: Category
+    description: 设备类型
+    properties:
+      id: string
+      name: string
+      system: string
+      parent_id: string
+      level: number
+      dataset: string
+    filterable_fields: [name, system, parent_id, level]
+  - name: Model
+    description: 设备型号
+    properties:
+      id: string
+      name: string
+      brand: string
+      cooling_kw: number
+      cop: number
+      refrigerant: string
+      noise_db: number
+      weight_kg: number
+      price_wan: number
+      dataset: string
+    filterable_fields: [name, brand, cooling_kw, cop, refrigerant, price_wan]
+  - name: Installation
+    description: 设备安装记录
+    properties:
+      id: string
+      model_id: string
+      project_id: string
+      quantity: number
+      install_date: date
+      status: string
+      dataset: string
+    filterable_fields: [model_id, project_id, quantity, install_date, status]
+relationships:
+  - name: OWNS_PROJECT
+    from: Customer
+    to: Project
+    cardinality: 1:N
+    direction: out
+  - name: HAS_INSTALLATION
+    from: Project
+    to: Installation
+    cardinality: 1:N
+    direction: out
+  - name: USES_MODEL
+    from: Installation
+    to: Model
+    cardinality: N:1
+    direction: out
+  - name: BELONGS_TO
+    from: Model
+    to: Category
+    cardinality: N:1
+    direction: out
+  - name: PARENT_OF
+    from: Category
+    to: Category
+    cardinality: 1:N
+    direction: out
+  - name: CAN_REPLACE
+    from: Model
+    to: Model
+    cardinality: N:N
+    direction: out
+paths:
+  SINGLE_DOMAIN:
+    - Category -> Model
+    - Model -> attributes
+  CROSS_DOMAIN:
+    - Customer -> Project -> Installation -> Model
+    - Project -> Installation -> Model
+  AGGREGATION:
+    - Model -> Installation -> Project -> Customer
+    - Project -> Installation -> Model
+  MULTI_STEP:
+    - Project[filter] -> Installation -> Model[filter]
+    - Customer -> Project[type] -> Installation -> Model -> CAN_REPLACE
+answer_formats:
+  property_query: key_value
+  compare_query: markdown_table
+  list_query: numbered_list
+  aggregation_query: ranking_table
+
