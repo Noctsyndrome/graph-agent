@@ -4,10 +4,22 @@ from fastapi import FastAPI, HTTPException
 
 from kgqa.config import get_settings
 from kgqa.models import QueryRequest, QueryResponse
+from kgqa.query import Neo4jExecutor, close_all_neo4j_drivers
 from kgqa.service import KGQAService
 
 settings = get_settings()
 app = FastAPI(title="kg-qa-poc", version="0.1.0")
+
+
+@app.on_event("startup")
+def startup_event() -> None:
+    executor = Neo4jExecutor(settings)
+    executor.warmup()
+
+
+@app.on_event("shutdown")
+def shutdown_event() -> None:
+    close_all_neo4j_drivers()
 
 
 @app.get("/health")
@@ -48,4 +60,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

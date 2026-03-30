@@ -1,4 +1,4 @@
-cases:
+baseline:
   - id: S1-1
     question: 冷水机组有哪些型号？
     must_include: [型号, 品牌]
@@ -38,25 +38,65 @@ cases:
   - id: S4-3
     question: 对比深圳和上海的项目，哪边的设备平均能效比更高？
     must_include: [深圳, 上海]
-  - id: V1
-    question: 开利机器装在哪些项目里？
+
+challenge:
+  - id: C1
+    question: 帮我列一下冷水机组的设备型号
+    must_include: [型号, 品牌]
+  - id: C2
+    question: 冷水机组里哪些型号 COP 超过 6？
+    must_include: [能效比, 型号]
+  - id: C3
+    question: 30XA-300 的参数给我看下
+    must_include: [30XA-300, 制冷剂]
+  - id: C4
+    question: 比较一下开利和约克冷水机组的差异
+    must_include: [开利, 约克]
+  - id: C5
+    question: 万科名下各项目都在用哪些冷水机品牌？
+    must_include: [万科, 项目]
+  - id: C6
+    question: 开利设备都落在哪些项目上？
     must_include: [项目]
-  - id: V2
+  - id: C7
+    question: 深圳项目装了哪些设备型号？
+    must_include: [项目]
+  - id: C8
+    question: 开利设备用量最多的是哪个客户？
+    must_include: [客户]
+  - id: C9
+    question: 全部项目里，各品牌设备分别占多少比例？
+    must_include: [品牌, 占比]
+  - id: C10
+    question: 哪座城市的项目总制冷量排第一？
+    must_include: [城市, 总制冷量]
+  - id: C11
+    question: 2024 年以后还有项目在用 R-22 吗？
+    must_include: [R-22, 项目]
+  - id: C12
+    question: 万科商业项目里最差 COP 的设备是什么，有替代型号吗？
+    must_include: [型号, 品牌]
+  - id: C13
+    question: 深圳和上海的项目相比，哪边平均能效更高？
+    must_include: [深圳, 上海]
+  - id: C14
     question: 深圳的项目使用了哪些品牌？
     must_include: [项目]
-  - id: V3
+  - id: C15
     question: 哪个客户的开利设备数量最多？
     must_include: [客户]
-  - id: V4
-    question: 30XA-300 有什么参数？
-    must_include: [30XA-300]
-  - id: V5
+  - id: C16
     question: 万科商业项目里 COP 最低的是哪台设备？
     must_include: [型号]
-  - id: E1
-    question: 不存在品牌XYZ的设备有哪些？
+  - id: C17
+    question: 有没有品牌 XYZ 的设备？
     allow_empty: true
-  - id: E2
+  - id: C18
     question: 火星区域的项目用了什么设备？
     allow_empty: true
-
+  - id: C19
+    question: 给我按项目看深圳区域当前都在用什么品牌和型号
+    must_include: [项目]
+  - id: C20
+    question: 冷水机组中开利和约克谁的平均能效比更高？
+    must_include: [开利, 约克]

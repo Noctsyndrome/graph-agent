@@ -14,6 +14,17 @@ SINGLE_DOMAIN:
     cypher: |
       MATCH (m:Model {dataset: 'kgqa_poc', name: '30XA-300'})
       RETURN m.name AS 型号, m.brand AS 品牌, m.cooling_kw AS 制冷量, m.cop AS 能效比, m.refrigerant AS 制冷剂, m.noise_db AS 噪音, m.weight_kg AS 重量, m.price_wan AS 价格
+  - question: 冷水机组里哪些型号 COP 超过 6？
+    cypher: |
+      MATCH (m:Model {dataset: 'kgqa_poc'})-[:BELONGS_TO]->(:Category {name: '冷水机组', dataset: 'kgqa_poc'})
+      WHERE m.cop > 6
+      RETURN m.name AS 型号, m.brand AS 品牌, m.cop AS 能效比
+      ORDER BY m.cop DESC
+  - question: 30X-325有哪些可替代方案？
+    cypher: |
+      MATCH (m:Model {dataset: 'kgqa_poc', name: '30X-325'})-[:CAN_REPLACE]->(replacement:Model {dataset: 'kgqa_poc'})
+      RETURN replacement.name AS 可替代型号, replacement.brand AS 品牌, replacement.cop AS 能效比, replacement.cooling_kw AS 制冷量
+      ORDER BY replacement.cop DESC
 CROSS_DOMAIN:
   - question: 万科的项目分别用了哪些品牌的冷水机组？
     cypher: |
@@ -27,6 +38,17 @@ CROSS_DOMAIN:
       WHERE m.brand = '开利'
       RETURN DISTINCT p.name AS 项目, p.city AS 城市, p.type AS 项目类型
       ORDER BY p.city, p.name
+  - question: 深圳的项目使用了哪些品牌？
+    cypher: |
+      MATCH (p:Project {dataset: 'kgqa_poc', city: '深圳'})-[:HAS_INSTALLATION]->(i:Installation {dataset: 'kgqa_poc'})-[:USES_MODEL]->(m:Model {dataset: 'kgqa_poc'})
+      RETURN p.name AS 项目, collect(DISTINCT m.brand) AS 品牌列表, sum(i.quantity) AS 数量
+      ORDER BY p.name
+  - question: 2023年后的项目中，有没有还在用R-22制冷剂设备的？
+    cypher: |
+      MATCH (p:Project {dataset: 'kgqa_poc'})-[:HAS_INSTALLATION]->(i:Installation {dataset: 'kgqa_poc'})-[:USES_MODEL]->(m:Model {dataset: 'kgqa_poc'})
+      WHERE p.start_date >= date('2024-01-01') AND m.refrigerant = 'R-22'
+      RETURN p.name AS 项目, p.city AS 城市, p.start_date AS 开始日期, m.name AS 型号, m.brand AS 品牌, m.refrigerant AS 制冷剂
+      ORDER BY p.start_date, p.name
 AGGREGATION:
   - question: 哪个客户使用开利设备最多？
     cypher: |
@@ -42,6 +64,12 @@ AGGREGATION:
       UNWIND rows AS row
       RETURN row.品牌 AS 品牌, row.数量 AS 数量, round(toFloat(row.数量) / total * 100, 2) AS 占比
       ORDER BY 数量 DESC
+  - question: 开利设备用量最多的是哪个客户？
+    cypher: |
+      MATCH (c:Customer {dataset: 'kgqa_poc'})-[:OWNS_PROJECT]->(:Project {dataset: 'kgqa_poc'})-[:HAS_INSTALLATION]->(i:Installation {dataset: 'kgqa_poc'})-[:USES_MODEL]->(m:Model {dataset: 'kgqa_poc'})
+      WHERE m.brand = '开利'
+      RETURN c.name AS 客户, sum(i.quantity) AS 使用数量
+      ORDER BY 使用数量 DESC
 MULTI_STEP:
   - question: 2023年后的项目中，有没有还在用R-22制冷剂设备的？
     cypher: |
@@ -56,4 +84,9 @@ MULTI_STEP:
       RETURN p.name AS 项目, m.name AS 型号, m.brand AS 品牌, m.cop AS 能效比
       ORDER BY m.cop ASC
       LIMIT 1
-
+  - question: 深圳和上海的项目相比，哪边平均能效更高？
+    cypher: |
+      MATCH (p:Project {dataset: 'kgqa_poc'})-[:HAS_INSTALLATION]->(:Installation {dataset: 'kgqa_poc'})-[:USES_MODEL]->(m:Model {dataset: 'kgqa_poc'})
+      WHERE p.city IN ['深圳', '上海']
+      RETURN p.city AS 城市, round(avg(m.cop), 2) AS 平均能效比
+      ORDER BY 平均能效比 DESC

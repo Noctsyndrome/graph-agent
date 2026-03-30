@@ -14,59 +14,88 @@ def run_evaluation() -> Path:
     scenarios = yaml.safe_load(settings.evaluation_file.read_text(encoding="utf-8"))
     service = KGQAService(settings)
     rows = []
-    passed = 0
 
-    for case in scenarios["cases"]:
-        try:
-            response = service.process_question(case["question"])
-            text = response.answer + "\n" + str(response.result_preview)
-            ok = all(keyword in text for keyword in case.get("must_include", []))
-            if case.get("allow_empty"):
-                ok = "图谱中未找到相关信息" in response.answer
-            rows.append(
-                {
-                    "id": case["id"],
-                    "question": case["question"],
-                    "intent": response.intent.value,
-                    "strategy": response.strategy,
-                    "pass": ok,
-                    "answer": response.answer,
-                    "latency_ms": response.latency_ms,
-                }
-            )
-            if ok:
-                passed += 1
-        except Exception as exc:
-            rows.append(
-                {
-                    "id": case["id"],
-                    "question": case["question"],
-                    "intent": "ERROR",
-                    "strategy": "ERROR",
-                    "pass": False,
-                    "answer": str(exc),
-                    "latency_ms": -1,
-                }
-            )
+    for group_name in ("baseline", "challenge"):
+        for case in scenarios.get(group_name, []):
+            rows.append(run_case(service, group_name, case))
 
     total = len(rows)
+    passed = sum(1 for row in rows if row["generalization_pass"])
     score = round((passed / total) * 100, 2) if total else 0.0
     report = _build_html(rows, passed, total, score)
     settings.report_file.write_text(report, encoding="utf-8")
     return settings.report_file
 
 
+def run_case(service: KGQAService, group_name: str, case: dict[str, object]) -> dict[str, object]:
+    try:
+        response = service.process_question(str(case["question"]))
+        text = response.answer + "\n" + str(response.result_preview)
+        generalization_pass = all(keyword in text for keyword in case.get("must_include", []))
+        if case.get("allow_empty"):
+            generalization_pass = "图谱中未找到相关信息" in response.answer
+
+        llm_stage_used = ",".join(
+            name
+            for name, source in (
+                ("intent", response.trace.intent.source.value),
+                ("plan", response.trace.plan.source.value),
+                ("cypher", response.trace.cypher.source.value),
+                ("answer", response.trace.answer.source.value),
+            )
+            if source == "llm"
+        )
+        rule_fallback_used = "yes" if response.trace.fallbacks else "no"
+        query_success = response.trace.query_success
+        answer_quality = "pass" if response.answer and "编造" not in response.answer else "fail"
+
+        return {
+            "group": group_name,
+            "id": case["id"],
+            "question": case["question"],
+            "intent": response.intent.value,
+            "strategy": response.strategy,
+            "llm_stage_used": llm_stage_used or "none",
+            "rule_fallback_used": rule_fallback_used,
+            "query_success": query_success,
+            "answer_quality": answer_quality,
+            "generalization_pass": generalization_pass,
+            "latency_ms": response.latency_ms,
+            "answer": response.answer,
+        }
+    except Exception as exc:
+        return {
+            "group": group_name,
+            "id": case["id"],
+            "question": case["question"],
+            "intent": "ERROR",
+            "strategy": "ERROR",
+            "llm_stage_used": "error",
+            "rule_fallback_used": "error",
+            "query_success": False,
+            "answer_quality": "fail",
+            "generalization_pass": False,
+            "latency_ms": -1,
+            "answer": str(exc),
+        }
+
+
 def _build_html(rows: list[dict[str, object]], passed: int, total: int, score: float) -> str:
-    tr = []
+    body = []
     for row in rows:
-        color = "#d1fae5" if row["pass"] else "#fee2e2"
-        tr.append(
+        pass_color = "#d1fae5" if row["generalization_pass"] else "#fee2e2"
+        body.append(
             "<tr>"
+            f"<td>{html.escape(str(row['group']))}</td>"
             f"<td>{html.escape(str(row['id']))}</td>"
             f"<td>{html.escape(str(row['question']))}</td>"
             f"<td>{html.escape(str(row['intent']))}</td>"
             f"<td>{html.escape(str(row['strategy']))}</td>"
-            f"<td style='background:{color}'>{html.escape(str(row['pass']))}</td>"
+            f"<td>{html.escape(str(row['llm_stage_used']))}</td>"
+            f"<td>{html.escape(str(row['rule_fallback_used']))}</td>"
+            f"<td>{html.escape(str(row['query_success']))}</td>"
+            f"<td>{html.escape(str(row['answer_quality']))}</td>"
+            f"<td style='background:{pass_color}'>{html.escape(str(row['generalization_pass']))}</td>"
             f"<td>{html.escape(str(row['latency_ms']))}</td>"
             f"<td>{html.escape(str(row['answer']))}</td>"
             "</tr>"
@@ -97,17 +126,22 @@ def _build_html(rows: list[dict[str, object]], passed: int, total: int, score: f
   <table>
     <thead>
       <tr>
+        <th>组别</th>
         <th>ID</th>
         <th>问题</th>
         <th>意图</th>
         <th>策略</th>
-        <th>是否通过</th>
+        <th>LLM阶段</th>
+        <th>规则回退</th>
+        <th>查询成功</th>
+        <th>回答质量</th>
+        <th>泛化通过</th>
         <th>耗时(ms)</th>
         <th>回答摘要</th>
       </tr>
     </thead>
     <tbody>
-      {''.join(tr)}
+      {''.join(body)}
     </tbody>
   </table>
 </body>
@@ -118,4 +152,3 @@ def _build_html(rows: list[dict[str, object]], passed: int, total: int, score: f
 if __name__ == "__main__":
     path = run_evaluation()
     print(f"Report generated at {path}")
-

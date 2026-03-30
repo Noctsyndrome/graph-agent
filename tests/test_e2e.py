@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import yaml
 from fastapi.testclient import TestClient
 
@@ -7,7 +9,8 @@ from kgqa.api import app
 
 
 def load_cases() -> list[dict[str, object]]:
-    return yaml.safe_load(open("tests/test_scenarios.yaml", encoding="utf-8"))["cases"]
+    payload = yaml.safe_load(Path("tests/test_scenarios.yaml").read_text(encoding="utf-8"))
+    return payload["baseline"][:2] + payload["challenge"][:2]
 
 
 def test_health() -> None:
@@ -28,7 +31,7 @@ def test_schema() -> None:
 
 def test_query_responses_have_expected_shape() -> None:
     client = TestClient(app)
-    cases = load_cases()[:4]
+    cases = load_cases()
     for case in cases:
         response = client.post("/query", json={"question": case["question"]})
         assert response.status_code in (200, 400)
@@ -36,3 +39,5 @@ def test_query_responses_have_expected_shape() -> None:
             payload = response.json()
             assert payload["intent"]
             assert "answer" in payload
+            assert "trace" in payload
+            assert "intent" in payload["trace"]

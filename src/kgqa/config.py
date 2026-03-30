@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="", alias="LLM_MODEL")
     app_log_level: str = Field(default="INFO", alias="APP_LOG_LEVEL")
     kgqa_api_base_url: str = Field(default="http://localhost:8000", alias="KGQA_API_BASE_URL")
+    neo4j_validate_with_explain: bool = Field(default=False, alias="NEO4J_VALIDATE_WITH_EXPLAIN")
     dataset_name: str = "kgqa_poc"
     schema_file: Path = ROOT / "data" / "schema.yaml"
     few_shots_file: Path = ROOT / "data" / "few_shots.yaml"

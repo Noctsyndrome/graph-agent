@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import datetime as dt
 import re
 from typing import Any
 
-from neo4j import GraphDatabase
+from neo4j import Driver, GraphDatabase
 
 from kgqa.config import Settings
 from kgqa.llm import LLMClient
-from kgqa.models import IntentType
+from kgqa.models import IntentResult, IntentType
+
+_DRIVER_CACHE: dict[tuple[str, str, str], Driver] = {}
 
 
 def quote(value: str) -> str:
@@ -19,26 +22,51 @@ def normalize_key(text: str) -> str:
     return sanitized.strip("_") or "value"
 
 
-class Neo4jExecutor:
-    def __init__(self, settings: Settings):
-        self.settings = settings
-        self.driver = GraphDatabase.driver(
+def get_neo4j_driver(settings: Settings) -> Driver:
+    key = (settings.neo4j_uri, settings.neo4j_username, settings.neo4j_password)
+    driver = _DRIVER_CACHE.get(key)
+    if driver is None:
+        driver = GraphDatabase.driver(
             settings.neo4j_uri,
             auth=(settings.neo4j_username, settings.neo4j_password),
         )
+        _DRIVER_CACHE[key] = driver
+    return driver
+
+
+def close_all_neo4j_drivers() -> None:
+    for driver in _DRIVER_CACHE.values():
+        driver.close()
+    _DRIVER_CACHE.clear()
+
+
+class Neo4jExecutor:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.driver = get_neo4j_driver(settings)
 
     def close(self) -> None:
-        self.driver.close()
+        # Driver is process-scoped and intentionally reused.
+        return None
+
+    def warmup(self) -> None:
+        self.driver.verify_connectivity()
+        with self.driver.session() as session:
+            session.run("RETURN 1 AS ok").consume()
 
     def explain(self, cypher: str) -> None:
         with self.driver.session() as session:
             session.run(f"EXPLAIN {cypher}").consume()
 
     def query(self, cypher: str) -> list[dict[str, Any]]:
-        self.explain(cypher)
+        if self.settings.neo4j_validate_with_explain:
+            self.explain(cypher)
         with self.driver.session() as session:
             result = session.run(cypher)
-            return [dict(record.items()) for record in result]
+            return [
+                {key: self._normalize_value(value) for key, value in record.items()}
+                for record in result
+            ]
 
     def load_seed_data(self, script: str) -> None:
         lines = []
@@ -56,6 +84,20 @@ class Neo4jExecutor:
             for statement in statements:
                 session.run(statement).consume()
 
+    @classmethod
+    def _normalize_value(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: cls._normalize_value(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [cls._normalize_value(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(cls._normalize_value(item) for item in value)
+        if isinstance(value, (dt.date, dt.datetime, dt.time)):
+            return value.isoformat()
+        if value.__class__.__module__.startswith("neo4j.time"):
+            return str(value)
+        return value
+
 
 class CypherSafetyValidator:
     FORBIDDEN = ("CREATE", "MERGE", "DELETE", "SET", "REMOVE", "CALL DBMS", "DROP", "LOAD CSV")
@@ -71,6 +113,12 @@ class CypherSafetyValidator:
             pattern = r"\b" + re.escape(token) + r"\b"
             if re.search(pattern, normalized):
                 raise ValueError(f"检测到不允许的操作: {token}")
+        if self._has_comparator_literal_in_property_map(cypher):
+            raise ValueError("检测到将范围/比较条件写成属性字符串，请改用 WHERE + 比较表达式。")
+
+    @staticmethod
+    def _has_comparator_literal_in_property_map(cypher: str) -> bool:
+        return bool(re.search(r"\{[^{}]*:\s*['\"]\s*[<>]=?.+?['\"][^{}]*\}", cypher))
 
 
 class CypherGenerator:
@@ -83,31 +131,66 @@ class CypherGenerator:
         self.settings = settings
         self.llm_client = llm_client
 
-    def generate_cypher(self, question: str, intent: IntentType, schema_context: str, few_shots: list[dict[str, str]]) -> str:
-        cypher = self._generate_with_rules(question)
-        if cypher:
-            return cypher
-        if self.settings.has_llm and self.llm_client is not None:
-            return self._generate_with_llm(question, schema_context, few_shots)
-        raise ValueError(f"暂不支持该问题的规则生成: {question}")
+    def generate_with_llm(
+        self,
+        question: str,
+        intent_result: IntentResult,
+        schema_context: str,
+        few_shots: list[dict[str, str]],
+        retry: bool = False,
+    ) -> str:
+        if self.llm_client is None:
+            raise RuntimeError("LLM is not configured for cypher generation.")
 
-    def _generate_with_llm(self, question: str, schema_context: str, few_shots: list[dict[str, str]]) -> str:
         examples = "\n\n".join(
             f"问题: {item['question']}\nCypher:\n{item['cypher']}" for item in few_shots
+        )
+        retry_instruction = (
+            "\n上一次输出未通过校验。请只输出一条可执行、只读、无 Markdown 包裹的 Cypher。"
+            "\n如果涉及时间范围、年份前后、数值比较，必须使用 WHERE 条件，"
+            "例如 p.start_date >= date('2024-01-01')，不要写成 {start_date: '>2023'} 这种属性字符串。"
+            if retry
+            else ""
         )
         prompt = (
             f"{schema_context}\n\n"
             f"## few-shot 示例\n{examples}\n\n"
-            "请把用户问题转换成单条只读 Cypher，只返回 Cypher 代码，不要解释。\n\n"
-            f"用户问题: {question}"
+            f"问题：{question}\n"
+            f"意图：{intent_result.intent.value}\n"
+            f"实体：{intent_result.entities}\n"
+            f"过滤条件：{intent_result.filters}\n"
+            f"聚合需求：{intent_result.needs_aggregation}\n"
+            f"多步需求：{intent_result.needs_multi_step}\n"
+            "请生成单条只读 Cypher，只返回 Cypher 本身。"
+            f"{retry_instruction}"
         )
+        system_prompt = (
+            "你是 NL2Cypher 生成器，只能生成单条只读 Cypher。"
+            " 涉及日期范围、年份前后、大小比较、时间过滤时，必须使用 WHERE 条件，"
+            "例如 p.start_date >= date('2024-01-01')。"
+            " 不要把 >2023、<2024、>=6 这类比较表达式写进节点属性 map。"
+        )
+        if "替代" in question:
+            system_prompt += (
+                " 对于“X有哪些可替代方案”这类问题，必须从源型号出发使用"
+                " (src:Model {name: 'X'})-[:CAN_REPLACE]->(replacement:Model) 的方向，"
+                "不要反向写成 replacement 指向源型号。"
+            )
         response = self.llm_client.generate(
             prompt=prompt,
-            system_prompt="你是 NL2Cypher 生成器，只能生成只读 Cypher。",
+            system_prompt=system_prompt,
         )
-        return response.content.strip().strip("`").replace("cypher", "", 1).strip()
+        text = LLMClient.strip_code_fence(response.content).strip()
+        text = re.sub(r"^cypher\s*", "", text, flags=re.IGNORECASE).strip()
+        return (
+            text.replace("，", ",")
+            .replace("（", "(")
+            .replace("）", ")")
+            .replace("；", ";")
+            .replace("：", ":")
+        )
 
-    def _generate_with_rules(self, question: str) -> str | None:
+    def generate_with_rules(self, question: str) -> str | None:
         text = question.replace(" ", "")
         customer = self._extract_one(text, self.CUSTOMERS)
         brand = self._extract_one(text, self.BRANDS)
@@ -265,6 +348,18 @@ class CypherGenerator:
             )
 
         return None
+
+    @staticmethod
+    def should_treat_empty_as_failure(question: str) -> bool:
+        text = question.replace(" ", "")
+        no_result_text = text.replace("有没有", "")
+        if any(keyword in no_result_text for keyword in ["不存在", "没有", "未找到", "空结果", "火星", "XYZ"]):
+            return False
+        if any(keyword in text for keyword in ["有哪些可替代方案", "可替代方案有哪些", "可替代的设备"]):
+            return True
+        if "替代" in text:
+            return False
+        return True
 
     @staticmethod
     def _extract_one(text: str, candidates: list[str]) -> str:
