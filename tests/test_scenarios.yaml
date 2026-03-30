@@ -100,3 +100,53 @@ challenge:
   - id: C20
     question: 冷水机组中开利和约克谁的平均能效比更高？
     must_include: [开利, 约克]
+
+generalization:
+  # A 类：同域换角度（规则无对应模板）
+  - id: G1
+    question: 噪音低于 70 分贝的冷水机组有哪些？
+    must_include: [型号, 噪音]
+  - id: G2
+    question: 价格在 80 万以上的设备型号有哪些？
+    must_include: [型号, 价格]
+  - id: G3
+    question: 格力有几个型号的冷水机组？
+    must_include: [格力]
+  - id: G4
+    question: 使用 R-410A 制冷剂的设备有哪些？
+    must_include: [型号, R-410A]
+  - id: G5
+    question: 重量最轻的冷水机组是哪个型号？
+    must_include: [型号, 重量]
+  # B 类：跨域新路径
+  - id: G6
+    question: 哪些项目同时安装了开利和约克的设备？
+    must_include: [项目]
+  - id: G7
+    question: 华润的项目分布在哪些城市？
+    must_include: [华润, 城市]
+  - id: G8
+    question: 安装数量超过 5 台的项目有哪些？
+    must_include: [项目]
+  - id: G9
+    question: 哪些客户的项目用了大金的设备？
+    must_include: [客户]
+  - id: G10
+    question: 苏州有哪些客户有项目？
+    must_include: [客户]
+  # C 类：复杂聚合与推理
+  - id: G11
+    question: 每个品牌的平均能效比是多少？
+    must_include: [品牌, 平均]
+  - id: G12
+    question: 哪个客户的项目数量最多？
+    must_include: [客户]
+  - id: G13
+    question: 建设中的项目有多少个？
+    must_include: [项目]
+  - id: G14
+    question: 万科和华润相比，谁的项目总面积更大？
+    must_include: [万科, 华润]
+  - id: G15
+    question: 最近开工的 5 个项目是哪些？
+    must_include: [项目]

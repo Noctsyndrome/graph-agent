@@ -7,7 +7,7 @@ import pytest
 from kgqa.config import get_settings
 from kgqa.models import IntentType, QueryPlan, QueryPlanStep
 from kgqa.planner import QueryPlanner
-from kgqa.query import CypherGenerator, CypherSafetyValidator, Neo4jExecutor
+from kgqa.query import CypherSafetyValidator, DomainRegistry, Neo4jExecutor
 from kgqa.router import IntentRouter
 from kgqa.service import KGQAService
 
@@ -66,24 +66,31 @@ def test_multistep_step_type_is_downgraded_to_direct_query() -> None:
 
 
 def test_intent_filter_normalizes_project_type_variants() -> None:
-    filters = IntentRouter._normalize_filters({"project_type": "商业项目", "type": "产业园项目"})
+    domain = DomainRegistry(get_settings())
+    domain._project_types = ["商业", "住宅", "产业园区"]
+    router = IntentRouter(None, domain=domain)
+    filters = router._normalize_filters({"project_type": "商业项目", "type": "产业园项目"})
     assert filters["project_type"] == "商业"
     assert filters["type"] == "产业园区"
 
 
 def test_context_keys_include_common_aliases() -> None:
-    keys = KGQAService._context_keys_for("step_1", "设备名称")
+    settings = get_settings()
+    service = KGQAService(settings)
+    keys = service._context_keys_for("step_1", "设备名称")
     assert "step_1_设备名称" in keys
     assert "step_1_型号" in keys
     assert "step_1_name" in keys
 
 
 def test_replacement_list_question_treats_empty_as_failure() -> None:
+    from kgqa.query import CypherGenerator
     assert CypherGenerator.should_treat_empty_as_failure("30X-325有哪些可替代方案？") is True
     assert CypherGenerator.should_treat_empty_as_failure("这台设备有没有可替代方案？") is False
 
 
 def test_yes_no_question_is_not_mistaken_for_explicit_no_result() -> None:
+    from kgqa.query import CypherGenerator
     assert CypherGenerator.should_treat_empty_as_failure("2023年后的项目中，有没有还在用R-22制冷剂设备的？") is True
 
 
@@ -104,3 +111,9 @@ def test_neo4j_executor_normalizes_date_like_values() -> None:
     )
     assert normalized["开始日期"] == "2024-03-01"
     assert normalized["列表"] == ["2024-03-02"]
+
+
+def test_domain_registry_exposes_dynamic_refrigerants() -> None:
+    domain = DomainRegistry(get_settings())
+    domain._refrigerants = ["R-22", "R-410A"]
+    assert domain.refrigerants == ["R-22", "R-410A"]

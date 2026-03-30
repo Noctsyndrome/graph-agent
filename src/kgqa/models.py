@@ -15,8 +15,6 @@ class IntentType(str, Enum):
 
 class SourceType(str, Enum):
     LLM = "llm"
-    RULE = "rule"
-    TEMPLATE = "template"
     NONE = "none"
 
 
@@ -57,13 +55,6 @@ class QueryRequest(BaseModel):
 class LLMResponse(BaseModel):
     content: str
     raw: dict[str, Any] = Field(default_factory=dict)
-
-
-class FallbackRecord(BaseModel):
-    stage: str
-    from_source: SourceType
-    to_source: SourceType
-    reason: str
 
 
 class IntentTrace(BaseModel):
@@ -108,7 +99,6 @@ class ExecutionTrace(BaseModel):
     plan: PlanTrace
     cypher: CypherTrace
     answer: AnswerTrace
-    fallbacks: list[FallbackRecord] = Field(default_factory=list)
     query_success: bool = False
     query_row_count: int = 0
     total_latency_ms: int = 0

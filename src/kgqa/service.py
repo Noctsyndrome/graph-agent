@@ -10,18 +10,18 @@ from kgqa.models import (
     AnswerTrace,
     CypherTrace,
     ExecutionTrace,
-    FallbackRecord,
     IntentResult,
     IntentType,
     IntentTrace,
     PlanTrace,
     QueryPlan,
+    QueryPlanStep,
     QueryResponse,
     SerializedResult,
     SourceType,
 )
 from kgqa.planner import QueryPlanner
-from kgqa.query import CypherGenerator, CypherSafetyValidator, Neo4jExecutor, normalize_key
+from kgqa.query import CypherGenerator, CypherSafetyValidator, DomainRegistry, Neo4jExecutor, normalize_key
 from kgqa.router import IntentRouter
 from kgqa.schema import SchemaRegistry
 from kgqa.serializer import ResultSerializer
@@ -30,11 +30,13 @@ from kgqa.serializer import ResultSerializer
 class KGQAService:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.schema = SchemaRegistry(settings)
-        self.llm_client = LLMClient(settings) if settings.has_llm else None
-        self.router = IntentRouter(self.llm_client)
-        self.planner = QueryPlanner(settings, self.llm_client)
-        self.generator = CypherGenerator(settings, self.llm_client)
+        self.domain = DomainRegistry(settings)
+        self.domain.load()
+        self.schema = SchemaRegistry(settings, domain=self.domain)
+        self.llm_client = LLMClient(settings)
+        self.router = IntentRouter(self.llm_client, domain=self.domain)
+        self.planner = QueryPlanner(settings, self.llm_client, domain=self.domain)
+        self.generator = CypherGenerator(settings, self.llm_client, domain=self.domain)
         self.validator = CypherSafetyValidator()
         self.serializer = ResultSerializer()
         self.answer_generator = AnswerGenerator(settings, self.llm_client)
@@ -49,9 +51,8 @@ class KGQAService:
 
     def process_question(self, question: str) -> QueryResponse:
         started = time.perf_counter()
-        fallbacks: list[FallbackRecord] = []
 
-        intent_result, intent_trace = self._resolve_intent(question, fallbacks)
+        intent_result, intent_trace = self._resolve_intent(question)
         schema_context = self.schema.render_schema_context(
             question=question,
             intent=intent_result.intent,
@@ -59,31 +60,26 @@ class KGQAService:
             filters=intent_result.filters,
         )
         few_shots = self.schema.few_shots_for_intent(intent_result.intent, question=question)
-        plan, plan_trace = self._resolve_plan(question, intent_result, schema_context, fallbacks)
-        cypher_text, rows, cypher_trace = self._execute_plan(question, plan, intent_result, schema_context, few_shots, fallbacks)
+        plan, plan_trace = self._resolve_plan(question, intent_result, schema_context)
+        cypher_text, rows, cypher_trace = self._execute_plan(question, plan, intent_result, schema_context, few_shots)
 
         serialized = self.serializer.serialize(rows, question, intent_result.intent)
-        answer, answer_trace = self._resolve_answer(question, intent_result, serialized, fallbacks)
+        answer, answer_trace = self._resolve_answer(question, intent_result, serialized)
         total_latency_ms = int((time.perf_counter() - started) * 1000)
         trace = ExecutionTrace(
             intent=intent_trace,
             plan=plan_trace,
             cypher=cypher_trace,
             answer=answer_trace,
-            fallbacks=fallbacks,
             query_success=bool(rows) or not self.generator.should_treat_empty_as_failure(question),
             query_row_count=len(rows),
             total_latency_ms=total_latency_ms,
         )
 
-        strategy = plan.strategy
-        if fallbacks:
-            strategy = "llm_with_rule_fallback"
-
         return QueryResponse(
             question=question,
             intent=intent_result.intent,
-            strategy=strategy,
+            strategy=plan.strategy,
             cypher=cypher_text,
             plan=plan if intent_result.needs_multi_step or intent_result.intent.value == "MULTI_STEP" else None,
             result_preview=serialized.preview,
@@ -92,60 +88,25 @@ class KGQAService:
             trace=trace,
         )
 
-    def _resolve_intent(self, question: str, fallbacks: list[FallbackRecord]) -> tuple[IntentResult, IntentTrace]:
-        if self.llm_client is None:
-            result = self.router.classify_with_rules(question)
-            return result, IntentTrace(
-                source=SourceType.RULE,
-                reason=result.reason,
-                confidence=result.confidence,
-                entities=result.entities,
-                filters=result.filters,
-                needs_aggregation=result.needs_aggregation,
-                needs_multi_step=result.needs_multi_step,
-            )
-
+    def _resolve_intent(self, question: str) -> tuple[IntentResult, IntentTrace]:
         started = time.perf_counter()
-        try:
-            result = self.router.classify_intent(question)
-            return result, IntentTrace(
-                source=SourceType.LLM,
-                reason=result.reason,
-                confidence=result.confidence,
-                entities=result.entities,
-                filters=result.filters,
-                needs_aggregation=result.needs_aggregation,
-                needs_multi_step=result.needs_multi_step,
-                latency_ms=int((time.perf_counter() - started) * 1000),
-            )
-        except Exception as exc:
-            fallback = self.router.classify_with_rules(question)
-            fallbacks.append(
-                FallbackRecord(
-                    stage="intent",
-                    from_source=SourceType.LLM,
-                    to_source=SourceType.RULE,
-                    reason=str(exc),
-                )
-            )
-            return fallback, IntentTrace(
-                source=SourceType.RULE,
-                reason=f"LLM intent failed: {exc}; fallback to rules",
-                confidence=fallback.confidence,
-                entities=fallback.entities,
-                filters=fallback.filters,
-                needs_aggregation=fallback.needs_aggregation,
-                needs_multi_step=fallback.needs_multi_step,
-                latency_ms=int((time.perf_counter() - started) * 1000),
-                attempts=2,
-            )
+        result = self.router.classify_intent(question)
+        return result, IntentTrace(
+            source=SourceType.LLM,
+            reason=result.reason,
+            confidence=result.confidence,
+            entities=result.entities,
+            filters=result.filters,
+            needs_aggregation=result.needs_aggregation,
+            needs_multi_step=result.needs_multi_step,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+        )
 
     def _resolve_plan(
         self,
         question: str,
         intent_result: IntentResult,
         schema_context: str,
-        fallbacks: list[FallbackRecord],
     ) -> tuple[QueryPlan, PlanTrace]:
         if intent_result.intent.value != "MULTI_STEP":
             plan = QueryPlan(
@@ -162,38 +123,15 @@ class KGQAService:
             )
 
         started = time.perf_counter()
-        if self.llm_client is not None:
-            try:
-                plan = self.planner.plan_query(question, intent_result, schema_context)
-                return plan, PlanTrace(
-                    source=SourceType.LLM,
-                    strategy=plan.strategy,
-                    steps=plan.steps,
-                    latency_ms=int((time.perf_counter() - started) * 1000),
-                    reason="llm planner succeeded",
-                    attempts=1,
-                )
-            except Exception as exc:
-                fallbacks.append(
-                    FallbackRecord(
-                        stage="plan",
-                        from_source=SourceType.LLM,
-                        to_source=SourceType.RULE,
-                        reason=str(exc),
-                    )
-                )
-                plan = self.planner.plan_with_rules(question)
-                return plan, PlanTrace(
-                    source=SourceType.RULE,
-                    strategy=plan.strategy,
-                    steps=plan.steps,
-                    latency_ms=int((time.perf_counter() - started) * 1000),
-                    reason=f"LLM planner failed: {exc}",
-                    attempts=2,
-                )
-
-        plan = self.planner.plan_with_rules(question)
-        return plan, PlanTrace(source=SourceType.RULE, strategy=plan.strategy, steps=plan.steps, reason="rule planner")
+        plan = self.planner.plan_query(question, intent_result, schema_context)
+        return plan, PlanTrace(
+            source=SourceType.LLM,
+            strategy=plan.strategy,
+            steps=plan.steps,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            reason="llm planner succeeded",
+            attempts=1,
+        )
 
     def _execute_plan(
         self,
@@ -202,7 +140,6 @@ class KGQAService:
         intent_result: IntentResult,
         schema_context: str,
         few_shots: list[dict[str, str]],
-        fallbacks: list[FallbackRecord],
     ) -> tuple[str | None, list[dict[str, Any]], CypherTrace]:
         context: dict[str, Any] = {}
         last_cypher: str | None = None
@@ -241,7 +178,6 @@ class KGQAService:
                 step_intent_result,
                 step_schema_context,
                 step_few_shots,
-                fallbacks,
             )
             last_cypher = cypher
             last_rows = rows
@@ -268,9 +204,11 @@ class KGQAService:
             return IntentType.AGGREGATION
         return IntentType.CROSS_DOMAIN
 
-    @staticmethod
-    def _extract_model_like_value(row: dict[str, Any]) -> Any:
-        for key in ("型号", "可替代型号", "可替代设备", "替代型号", "设备型号", "name"):
+    def _extract_model_like_value(self, row: dict[str, Any]) -> Any:
+        alias_config = self.schema.schema.get("column_aliases", {})
+        model_def = alias_config.get("型号", {})
+        candidates = ["型号"] + model_def.get("zh", []) + model_def.get("en", [])
+        for key in candidates:
             value = row.get(key)
             if value:
                 return value
@@ -296,30 +234,19 @@ class KGQAService:
             merged["替代品牌"] = list(dict.fromkeys(replacement_brands))
         return merged
 
-    @staticmethod
-    def _context_keys_for(step_id: str, raw_key: str) -> list[str]:
+    def _context_keys_for(self, step_id: str, raw_key: str) -> list[str]:
         normalized = normalize_key(raw_key)
         keys = [f"{step_id}_{normalized}"]
         compact = raw_key.replace(" ", "")
-        aliases = {
-            "项目": ("项目", "项目名称", "project", "project_name"),
-            "型号": ("型号", "设备型号", "设备名称", "机型", "可替代型号", "可替代设备", "name", "model", "model_name"),
-            "品牌": ("品牌", "brand"),
-            "能效比": ("能效比", "COP", "cop"),
-            "制冷量": ("制冷量",),
-        }
-        english_aliases = {
-            "项目": "project_name",
-            "型号": "name",
-            "品牌": "brand",
-            "能效比": "cop",
-        }
-        for canonical, candidates in aliases.items():
+        alias_config = self.schema.schema.get("column_aliases", {})
+        for canonical, alias_def in alias_config.items():
+            zh_list = alias_def.get("zh", [])
+            en_list = alias_def.get("en", [])
+            candidates = [canonical] + zh_list + en_list
             if any(candidate in compact for candidate in candidates):
                 keys.append(f"{step_id}_{canonical}")
-                english_alias = english_aliases.get(canonical)
-                if english_alias:
-                    keys.append(f"{step_id}_{english_alias}")
+                if en_list:
+                    keys.append(f"{step_id}_{en_list[0]}")
         return list(dict.fromkeys(keys))
 
     def _run_single_question(
@@ -328,116 +255,46 @@ class KGQAService:
         intent_result: IntentResult,
         schema_context: str,
         few_shots: list[dict[str, str]],
-        fallbacks: list[FallbackRecord],
     ) -> tuple[str, list[dict[str, Any]], CypherTrace]:
         started = time.perf_counter()
         attempts = 0
-        if self.llm_client is not None:
-            last_error = "unknown llm failure"
-            for retry in (False, True):
-                attempts += 1
-                try:
-                    cypher = self.generator.generate_with_llm(question, intent_result, schema_context, few_shots, retry=retry)
-                    self.validator.validate(cypher)
-                    executor = Neo4jExecutor(self.settings)
-                    try:
-                        rows = executor.query(cypher)
-                    finally:
-                        executor.close()
-                    if not rows and self.generator.should_treat_empty_as_failure(question):
-                        last_error = "llm cypher returned empty rows"
-                        continue
-                    return cypher, rows, CypherTrace(
-                        source=SourceType.LLM,
-                        text=cypher,
-                        valid=True,
-                        reason="llm cypher succeeded",
-                        latency_ms=int((time.perf_counter() - started) * 1000),
-                        attempts=attempts,
-                    )
-                except Exception as exc:
-                    last_error = str(exc)
-            rule_cypher = self.generator.generate_with_rules(question)
-            if rule_cypher:
-                fallbacks.append(
-                    FallbackRecord(
-                        stage="cypher",
-                        from_source=SourceType.LLM,
-                        to_source=SourceType.RULE,
-                        reason=last_error,
-                    )
-                )
-                self.validator.validate(rule_cypher)
+        last_error = "unknown llm failure"
+        for retry in (False, True):
+            attempts += 1
+            try:
+                cypher = self.generator.generate_with_llm(question, intent_result, schema_context, few_shots, retry=retry)
+                self.validator.validate(cypher)
                 executor = Neo4jExecutor(self.settings)
                 try:
-                    rows = executor.query(rule_cypher)
+                    rows = executor.query(cypher)
                 finally:
                     executor.close()
-                return rule_cypher, rows, CypherTrace(
-                    source=SourceType.RULE,
-                    text=rule_cypher,
+                if not rows and self.generator.should_treat_empty_as_failure(question):
+                    last_error = "llm cypher returned empty rows"
+                    continue
+                return cypher, rows, CypherTrace(
+                    source=SourceType.LLM,
+                    text=cypher,
                     valid=True,
-                    reason=f"fallback after llm failure: {last_error}",
+                    reason="llm cypher succeeded",
                     latency_ms=int((time.perf_counter() - started) * 1000),
-                    attempts=attempts + 1,
+                    attempts=attempts,
                 )
-            raise ValueError(f"LLM cypher failed and no rule fallback matched: {last_error}")
-
-        rule_cypher = self.generator.generate_with_rules(question)
-        if not rule_cypher:
-            raise ValueError(f"暂不支持该问题的规则生成: {question}")
-        self.validator.validate(rule_cypher)
-        executor = Neo4jExecutor(self.settings)
-        try:
-            rows = executor.query(rule_cypher)
-        finally:
-            executor.close()
-        return rule_cypher, rows, CypherTrace(
-            source=SourceType.RULE,
-            text=rule_cypher,
-            valid=True,
-            reason="rule cypher executed",
-            latency_ms=int((time.perf_counter() - started) * 1000),
-            attempts=1,
-        )
+            except Exception as exc:
+                last_error = str(exc)
+        raise ValueError(f"LLM cypher failed after {attempts} attempts: {last_error}")
 
     def _resolve_answer(
         self,
         question: str,
         intent_result: IntentResult,
         serialized: SerializedResult,
-        fallbacks: list[FallbackRecord],
     ) -> tuple[str, AnswerTrace]:
         trace_summary = f"intent={intent_result.intent.value}, rows={serialized.row_count}"
         started = time.perf_counter()
-        if self.llm_client is not None:
-            try:
-                answer = self.answer_generator.compose_with_llm(question, intent_result, serialized, trace_summary)
-                return answer, AnswerTrace(
-                    source=SourceType.LLM,
-                    reason="llm answer generation succeeded",
-                    latency_ms=int((time.perf_counter() - started) * 1000),
-                )
-            except Exception as exc:
-                fallbacks.append(
-                    FallbackRecord(
-                        stage="answer",
-                        from_source=SourceType.LLM,
-                        to_source=SourceType.TEMPLATE,
-                        reason=str(exc),
-                    )
-                )
-                answer = self.answer_generator.compose_with_template(question, intent_result, serialized)
-                return answer, AnswerTrace(
-                    source=SourceType.TEMPLATE,
-                    reason=f"fallback after llm answer failure: {exc}",
-                    latency_ms=int((time.perf_counter() - started) * 1000),
-                    attempts=2,
-                )
-
-        answer = self.answer_generator.compose_with_template(question, intent_result, serialized)
+        answer = self.answer_generator.compose_with_llm(question, intent_result, serialized, trace_summary)
         return answer, AnswerTrace(
-            source=SourceType.TEMPLATE,
-            reason="template answer generator",
+            source=SourceType.LLM,
+            reason="llm answer generation succeeded",
             latency_ms=int((time.perf_counter() - started) * 1000),
         )

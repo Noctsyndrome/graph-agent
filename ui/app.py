@@ -1,76 +1,44 @@
 from __future__ import annotations
 
 import os
-from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 import httpx
 import streamlit as st
+import yaml
 
 API_BASE_URL = os.getenv("KGQA_API_BASE_URL", "http://localhost:8000").rstrip("/")
 
-PRESET_QUESTIONS = [
-    {
-        "category": "单域查询",
-        "label": "冷水机组型号列表",
-        "question": "冷水机组有哪些型号？",
-        "purpose": "验证设备型号清单和基础列表查询。",
+_SCENARIOS_PATH = Path(__file__).parent.parent / "tests" / "test_scenarios.yaml"
+
+_GROUP_META: dict[str, dict[str, str]] = {
+    "baseline": {
+        "label": "基准用例 Baseline",
+        "desc": "核心场景验证，覆盖四种查询类型",
     },
-    {
-        "category": "单域查询",
-        "label": "高能效冷水机组",
-        "question": "能效比在6以上的冷水机组有哪些？",
-        "purpose": "验证数值过滤与排序。",
+    "challenge": {
+        "label": "挑战用例 Challenge",
+        "desc": "同义改写、边界条件与空结果测试",
     },
-    {
-        "category": "单域查询",
-        "label": "查看设备参数",
-        "question": "开利 30XA-300 的详细参数是什么？",
-        "purpose": "验证指定型号属性查询。",
+    "generalization": {
+        "label": "泛化用例 Generalization",
+        "desc": "规则未覆盖的新角度与新路径",
     },
-    {
-        "category": "跨域查询",
-        "label": "万科项目品牌分布",
-        "question": "万科的项目分别用了哪些品牌的冷水机组？",
-        "purpose": "验证客户-项目-安装-型号的跨域链路。",
-    },
-    {
-        "category": "跨域查询",
-        "label": "深圳项目设备清单",
-        "question": "深圳区域的项目都用了什么设备？",
-        "purpose": "验证按城市汇总项目设备。",
-    },
-    {
-        "category": "聚合统计",
-        "label": "开利设备用量最多客户",
-        "question": "哪个客户使用开利设备最多？",
-        "purpose": "验证聚合与排序。",
-    },
-    {
-        "category": "聚合统计",
-        "label": "品牌占比",
-        "question": "各品牌设备在所有项目中的占比是多少？",
-        "purpose": "验证占比和聚合输出。",
-    },
-    {
-        "category": "多步推理",
-        "label": "最低能效设备 + 替代方案",
-        "question": "万科的商业项目中，能效比最低的设备是哪台？有没有可替代方案？",
-        "purpose": "验证多步规划、步骤衔接和替代关系查询。",
-    },
-    {
-        "category": "多步推理",
-        "label": "R-22 合规检查",
-        "question": "2023年后的项目中，有没有还在用R-22制冷剂设备的？",
-        "purpose": "验证时间过滤和合规排查场景。",
-    },
-    {
-        "category": "挑战问题",
-        "label": "同义改写",
-        "question": "万科商业项目里最差 COP 的设备是什么，有替代型号吗？",
-        "purpose": "验证泛化问法下的多步处理。",
-    },
-]
+}
+
+
+# ------------------------------------------------------------------
+# Data loaders
+# ------------------------------------------------------------------
+
+
+@st.cache_data
+def load_test_scenarios() -> dict[str, list[dict[str, Any]]]:
+    """Load test scenarios from the shared YAML file used by eval framework."""
+    if not _SCENARIOS_PATH.exists():
+        return {}
+    return yaml.safe_load(_SCENARIOS_PATH.read_text(encoding="utf-8")) or {}
 
 
 @st.cache_data(ttl=15)
@@ -101,6 +69,33 @@ def request_seed_load() -> dict[str, Any]:
     response = httpx.post(f"{API_BASE_URL}/seed/load", timeout=120.0)
     response.raise_for_status()
     return response.json()
+
+
+def refresh_system_status() -> None:
+    health_error = ""
+    schema_error = ""
+    health_payload: dict[str, Any] | None = None
+    schema_payload: dict[str, Any] | None = None
+
+    try:
+        health_payload = fetch_health()
+    except Exception as exc:
+        health_error = str(exc)
+
+    try:
+        schema_payload = fetch_schema_summary()
+    except Exception as exc:
+        schema_error = str(exc)
+
+    st.session_state.health_payload = health_payload
+    st.session_state.schema_payload = schema_payload
+    st.session_state.health_error = health_error
+    st.session_state.schema_error = schema_error
+
+
+# ------------------------------------------------------------------
+# Rendering helpers
+# ------------------------------------------------------------------
 
 
 def render_trace_summary(trace: dict[str, Any]) -> None:
@@ -141,12 +136,7 @@ def render_trace_summary(trace: dict[str, Any]) -> None:
     ]
     st.dataframe(stage_rows, use_container_width=True, hide_index=True)
 
-    fallback_rows = trace.get("fallbacks", [])
-    if fallback_rows:
-        st.warning(f"本次请求发生 {len(fallback_rows)} 次 fallback。")
-        st.dataframe(fallback_rows, use_container_width=True, hide_index=True)
-    else:
-        st.success("本次请求未发生 fallback。")
+    st.success("全链路 LLM 执行完成。")
 
 
 def render_plan(plan: dict[str, Any] | None) -> None:
@@ -179,7 +169,14 @@ def render_intent(trace: dict[str, Any]) -> None:
         st.caption(intent["reason"])
 
 
+# ------------------------------------------------------------------
+# Page config & session state
+# ------------------------------------------------------------------
+
 st.set_page_config(page_title="KG-QA PoC", page_icon="🔎", layout="wide")
+
+scenarios = load_test_scenarios()
+total_cases = sum(len(v) for v in scenarios.values())
 
 if "query_payload" not in st.session_state:
     st.session_state.query_payload = None
@@ -187,32 +184,88 @@ if "query_error" not in st.session_state:
     st.session_state.query_error = ""
 if "seed_message" not in st.session_state:
     st.session_state.seed_message = ""
+if "health_payload" not in st.session_state:
+    st.session_state.health_payload = None
+if "schema_payload" not in st.session_state:
+    st.session_state.schema_payload = None
+if "health_error" not in st.session_state:
+    st.session_state.health_error = ""
+if "schema_error" not in st.session_state:
+    st.session_state.schema_error = ""
 if "question_input" not in st.session_state:
-    st.session_state.question_input = PRESET_QUESTIONS[7]["question"]
-if "selected_preset" not in st.session_state:
-    st.session_state.selected_preset = PRESET_QUESTIONS[7]["label"]
+    default_q = ""
+    for case in scenarios.get("baseline", []):
+        if case["id"] == "S4-2":
+            default_q = case["question"]
+            break
+    st.session_state.question_input = default_q
+if "selected_case_id" not in st.session_state:
+    st.session_state.selected_case_id = "S4-2"
+if st.session_state.health_payload is None and not st.session_state.health_error:
+    refresh_system_status()
+
+# ------------------------------------------------------------------
+# Title
+# ------------------------------------------------------------------
 
 st.title("知识图谱智能问答 PoC")
 st.caption(f"当前 API 地址：[${API_BASE_URL}]({API_BASE_URL})".replace("$", ""))
 
-with st.sidebar:
-    st.header("预置问题")
-    grouped_presets: dict[str, list[dict[str, str]]] = defaultdict(list)
-    for item in PRESET_QUESTIONS:
-        grouped_presets[item["category"]].append(item)
+# ------------------------------------------------------------------
+# Sidebar — test case selector
+# ------------------------------------------------------------------
 
-    for category, items in grouped_presets.items():
-        st.subheader(category)
-        for item in items:
-            if st.button(item["label"], use_container_width=True, key=f"preset_{item['label']}"):
-                st.session_state.question_input = item["question"]
-                st.session_state.selected_preset = item["label"]
-        with st.expander(f"{category}说明", expanded=False):
-            for item in items:
-                st.markdown(f"**{item['label']}**")
-                st.caption(item["purpose"])
+with st.sidebar:
+    st.header("测试用例")
+    st.caption(f"共 {total_cases} 条用例，来自 test_scenarios.yaml")
+
+    group_keys = [k for k in _GROUP_META if k in scenarios]
+
+    if group_keys:
+        selected_group = st.selectbox(
+            "用例分组",
+            group_keys,
+            format_func=lambda k: f"{_GROUP_META[k]['label']} ({len(scenarios.get(k, []))})",
+            key="_sel_group",
+        )
+        st.caption(_GROUP_META[selected_group]["desc"])
+
+        cases = scenarios.get(selected_group, [])
+        case_map: dict[str, dict[str, Any]] = {c["id"]: c for c in cases}
+
+        selected_id = st.selectbox(
+            "选择用例",
+            [c["id"] for c in cases],
+            format_func=lambda cid: f"{cid} | {case_map[cid]['question']}",
+            key="_sel_case",
+        )
+
+        case = case_map.get(selected_id)
+        if case:
+            with st.container(border=True):
+                st.markdown(f"**{case['id']}**")
+                st.write(case["question"])
+                tags: list[str] = []
+                must = case.get("must_include")
+                if must:
+                    tags.append(f"期望包含: {', '.join(must)}")
+                if case.get("allow_empty"):
+                    tags.append("允许空结果")
+                if tags:
+                    st.caption(" | ".join(tags))
+
+            if st.button("填入此用例", use_container_width=True, type="primary"):
+                st.session_state.question_input = case["question"]
+                st.session_state.selected_case_id = case["id"]
+    else:
+        st.warning("未找到测试用例文件 (tests/test_scenarios.yaml)。")
 
     st.divider()
+
+    st.caption("也可直接在右侧输入框中输入自定义问题。")
+
+    st.divider()
+
     if st.button("导入种子数据", use_container_width=True):
         try:
             with st.spinner("正在导入种子数据..."):
@@ -220,21 +273,23 @@ with st.sidebar:
             st.session_state.seed_message = "种子数据导入完成。"
             fetch_health.clear()
             fetch_schema_summary.clear()
+            refresh_system_status()
         except Exception as exc:
             st.session_state.seed_message = f"导入失败: {exc}"
 
-health_error = ""
-schema_error = ""
-health_payload: dict[str, Any] | None = None
-schema_payload: dict[str, Any] | None = None
-try:
-    health_payload = fetch_health()
-except Exception as exc:
-    health_error = str(exc)
-try:
-    schema_payload = fetch_schema_summary()
-except Exception as exc:
-    schema_error = str(exc)
+    if st.button("刷新系统状态", use_container_width=True):
+        fetch_health.clear()
+        fetch_schema_summary.clear()
+        refresh_system_status()
+
+# ------------------------------------------------------------------
+# Status bar
+# ------------------------------------------------------------------
+
+health_error = st.session_state.health_error
+schema_error = st.session_state.schema_error
+health_payload = st.session_state.health_payload
+schema_payload = st.session_state.schema_payload
 
 info_cols = st.columns(4)
 with info_cols[0]:
@@ -260,16 +315,26 @@ if st.session_state.seed_message:
     else:
         st.success(st.session_state.seed_message)
 
+# ------------------------------------------------------------------
+# Query input form
+# ------------------------------------------------------------------
+
 with st.form("query_form", clear_on_submit=False):
     st.text_area(
         "请输入问题",
         key="question_input",
         height=100,
-        help="可以直接输入自然语言问题，也可以点击左侧预置问题快速填充。",
+        help="可从左侧选择测试用例自动填入，也可直接输入自定义问题。",
     )
     run_query = st.form_submit_button("执行查询", type="primary", use_container_width=True)
 
-st.caption(f"当前选中预置问题：{st.session_state.selected_preset}")
+case_id = st.session_state.get("selected_case_id", "")
+if case_id:
+    st.caption(f"当前选中用例：{case_id}")
+
+# ------------------------------------------------------------------
+# Query execution
+# ------------------------------------------------------------------
 
 if run_query:
     question = st.session_state.question_input.strip()
@@ -293,6 +358,10 @@ if run_query:
             st.session_state.query_error = f"查询失败: {exc}"
             st.session_state.query_payload = None
 
+# ------------------------------------------------------------------
+# Results display
+# ------------------------------------------------------------------
+
 if st.session_state.query_error:
     st.error(st.session_state.query_error)
 
@@ -309,7 +378,7 @@ if payload:
     with overview_cols[3]:
         st.metric("结果行数", trace.get("query_row_count", len(payload.get("result_preview", []))))
     with overview_cols[4]:
-        st.metric("Fallback 次数", len(trace.get("fallbacks", [])))
+        st.metric("LLM 阶段", sum(1 for s in ["intent", "plan", "cypher", "answer"] if trace.get(s, {}).get("source") == "llm"))
 
     top_left, top_right = st.columns([1.15, 1])
     with top_left:

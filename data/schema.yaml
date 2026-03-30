@@ -102,6 +102,27 @@ paths:
   MULTI_STEP:
     - Project[filter] -> Installation -> Model[filter]
     - Customer -> Project[type] -> Installation -> Model -> CAN_REPLACE
+column_aliases:
+  项目:
+    zh: [项目名称]
+    en: [project, project_name]
+  型号:
+    zh: [设备型号, 设备名称, 机型, 可替代型号, 可替代设备, 替代型号]
+    en: [name, model, model_name]
+  品牌:
+    zh: [品牌名称]
+    en: [brand]
+  能效比:
+    zh: []
+    en: [COP, cop]
+  制冷量:
+    zh: []
+    en: [cooling_kw]
+few_shot_scoring:
+  entity_description_weight: 1
+  column_alias_weight: 2
+  domain_value_weight: 3
+  relationship_weight: 2
 answer_formats:
   property_query: key_value
   compare_query: markdown_table

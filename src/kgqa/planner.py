@@ -3,12 +3,14 @@ from __future__ import annotations
 from kgqa.config import Settings
 from kgqa.llm import LLMClient
 from kgqa.models import IntentResult, IntentType, QueryPlan, QueryPlanStep
+from kgqa.query import DomainRegistry
 
 
 class QueryPlanner:
-    def __init__(self, settings: Settings, llm_client: LLMClient | None = None):
+    def __init__(self, settings: Settings, llm_client: LLMClient, domain: DomainRegistry | None = None):
         self.settings = settings
         self.llm_client = llm_client
+        self.domain = domain
 
     def plan_query(self, question: str, intent_result: IntentResult, schema_context: str) -> QueryPlan:
         if intent_result.intent is not IntentType.MULTI_STEP:
@@ -17,63 +19,10 @@ class QueryPlanner:
                 steps=[QueryPlanStep(id="step_1", goal="执行单步查询", query_type=intent_result.intent, question=question)],
             )
 
-        if self.llm_client is not None:
-            return self._plan_with_llm(question, intent_result, schema_context)
-        return self.plan_with_rules(question)
-
-    def plan_with_rules(self, question: str) -> QueryPlan:
-        text = question.replace(" ", "")
-        if "替代" in text:
-            customer = self._extract_one(text, ["万科", "华润", "招商蛇口", "龙湖", "保利", "金地", "旭辉", "华侨城", "中粮", "华发"]) or "万科"
-            project_type = self._extract_one(text, ["商业", "住宅", "产业园区"]) or "商业"
-            return QueryPlan(
-                strategy="rule_based_multistep",
-                steps=[
-                    QueryPlanStep(
-                        id="step_1",
-                        goal="查找目标范围内能效比最低的设备",
-                        query_type=IntentType.CROSS_DOMAIN,
-                        question=f"查找{customer}{project_type}项目中能效比最低的设备",
-                    ),
-                    QueryPlanStep(
-                        id="step_2",
-                        goal="查询该设备的可替代方案",
-                        query_type=IntentType.SINGLE_DOMAIN,
-                        question="查找 {step_1_型号} 的可替代方案",
-                        depends_on=["step_1"],
-                    ),
-                ],
-            )
-        if "R-22" in text and "2023年后" in text:
-            return QueryPlan(
-                strategy="rule_based_multistep",
-                steps=[
-                    QueryPlanStep(
-                        id="step_1",
-                        goal="查找2024年及以后项目中使用R-22设备的记录",
-                        query_type=IntentType.CROSS_DOMAIN,
-                        question="查询2023年后的项目中使用R-22制冷剂设备的情况",
-                    )
-                ],
-            )
-        if "深圳" in text and "上海" in text and "平均能效比" in text:
-            return QueryPlan(
-                strategy="rule_based_multistep",
-                steps=[
-                    QueryPlanStep(
-                        id="step_1",
-                        goal="计算深圳和上海项目的平均能效比并比较",
-                        query_type=IntentType.AGGREGATION,
-                        question="对比深圳和上海的项目设备平均能效比",
-                    )
-                ],
-            )
-        return QueryPlan(
-            strategy="rule_based_multistep",
-            steps=[QueryPlanStep(id="step_1", goal="执行复杂查询", query_type=IntentType.MULTI_STEP, question=question)],
-        )
+        return self._plan_with_llm(question, intent_result, schema_context)
 
     def _plan_with_llm(self, question: str, intent_result: IntentResult, schema_context: str) -> QueryPlan:
+        project_types = "、".join(self.domain.project_types) if self.domain and self.domain.project_types else "当前图谱中的项目类型"
         base_system_prompt = (
             "你是知识图谱问答查询规划器。根据问题、意图和 schema，输出最多5步的 JSON："
             "{\"strategy\": str, \"steps\": [{\"id\": str, \"goal\": str, \"query_type\": str, "
@@ -82,8 +31,8 @@ class QueryPlanner:
             "所有 step.question 必须是中文、可直接单独提问给 NL2Cypher 的自然语言子问题。"
             "如果某一步依赖前一步的结果，必须使用 Python format 风格占位符，例如 {step_1_型号}，"
             "不能写成 'found in step_1' 或其它英语描述。"
-            "必须保留 schema 中的精确枚举值，例如项目类型只能用 商业、住宅、产业园区，"
-            "不要擅自改成 商业项目、住宅项目。"
+            f"必须保留 schema 中的精确枚举值。当前图谱中的项目类型只有：{project_types}。"
+            "不要擅自添加“项目”“类项目”等后缀。"
             "对于“最低设备 + 替代方案”这类问题，优先拆成两步：先定位设备，再查询替代方案。"
             "只输出 JSON。"
         )
@@ -123,13 +72,6 @@ class QueryPlanner:
             except Exception as exc:
                 last_error = str(exc)
         raise ValueError(last_error)
-
-    @staticmethod
-    def _extract_one(text: str, candidates: list[str]) -> str:
-        for candidate in candidates:
-            if candidate in text:
-                return candidate
-        return ""
 
     @staticmethod
     def _validate_plan(plan: QueryPlan) -> None:

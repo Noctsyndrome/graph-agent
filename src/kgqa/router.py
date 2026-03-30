@@ -4,51 +4,16 @@ import re
 
 from kgqa.llm import LLMClient
 from kgqa.models import IntentResult, IntentType
-
-
-class RuleIntentRouter:
-    def classify_intent(self, question: str) -> IntentResult:
-        text = re.sub(r"\s+", "", question)
-
-        if any(keyword in text for keyword in ["替代方案", "可替代", "R-22", "2023年后"]):
-            return IntentResult(
-                intent=IntentType.MULTI_STEP,
-                confidence=0.95,
-                reason="命中复杂条件或替代推理关键词",
-                needs_multi_step=True,
-            )
-        if "对比" in text and "平均能效比" in text:
-            return IntentResult(
-                intent=IntentType.MULTI_STEP,
-                confidence=0.9,
-                reason="跨城市比较问题归入多步策略",
-                needs_multi_step=True,
-                needs_aggregation=True,
-            )
-        if any(keyword in text for keyword in ["占比", "最多", "最大", "排名", "平均"]):
-            return IntentResult(
-                intent=IntentType.AGGREGATION,
-                confidence=0.9,
-                reason="命中聚合统计关键词",
-                needs_aggregation=True,
-            )
-        if any(keyword in text for keyword in ["项目", "客户", "区域", "城市", "安装了", "用了什么设备"]):
-            return IntentResult(intent=IntentType.CROSS_DOMAIN, confidence=0.86, reason="命中跨域关联关键词")
-        return IntentResult(intent=IntentType.SINGLE_DOMAIN, confidence=0.82, reason="默认单域精确查询")
+from kgqa.query import DomainRegistry
 
 
 class IntentRouter:
-    def __init__(self, llm_client: LLMClient | None = None):
+    def __init__(self, llm_client: LLMClient | None, domain: DomainRegistry | None = None):
         self.llm_client = llm_client
-        self.rule_router = RuleIntentRouter()
+        self.domain = domain
 
     def classify_intent(self, question: str) -> IntentResult:
-        if self.llm_client is not None:
-            return self._classify_with_llm(question)
-        return self.rule_router.classify_intent(question)
-
-    def classify_with_rules(self, question: str) -> IntentResult:
-        return self.rule_router.classify_intent(question)
+        return self._classify_with_llm(question)
 
     def _classify_with_llm(self, question: str) -> IntentResult:
         system_prompt = (
@@ -76,17 +41,30 @@ class IntentRouter:
             needs_multi_step=bool(payload.get("needs_multi_step", False)),
         )
 
-    @staticmethod
-    def _normalize_filters(filters: dict[str, object]) -> dict[str, object]:
+    def _normalize_filters(self, filters: dict[str, object]) -> dict[str, object]:
         normalized = dict(filters)
         for key in ("project_type", "type"):
             value = normalized.get(key)
             if isinstance(value, str):
-                compact = re.sub(r"\s+", "", value)
-                if compact in {"商业项目", "商业类项目"}:
-                    normalized[key] = "商业"
-                elif compact in {"住宅项目", "住宅类项目"}:
-                    normalized[key] = "住宅"
-                elif compact in {"产业园", "产业园项目", "园区项目"}:
-                    normalized[key] = "产业园区"
+                matched = self._match_project_type(value)
+                if matched:
+                    normalized[key] = matched
         return normalized
+
+    def _match_project_type(self, value: str) -> str | None:
+        if not self.domain:
+            return None
+        compact = self._compact_type_label(value)
+        for candidate in self.domain.project_types:
+            candidate_compact = self._compact_type_label(candidate)
+            if compact == candidate_compact or compact.startswith(candidate_compact) or candidate_compact.startswith(compact):
+                return candidate
+        return None
+
+    @staticmethod
+    def _compact_type_label(value: str) -> str:
+        compact = re.sub(r"\s+", "", value)
+        for suffix in ("类项目", "项目"):
+            if compact.endswith(suffix):
+                compact = compact[: -len(suffix)]
+        return compact
