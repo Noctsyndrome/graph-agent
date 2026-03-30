@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -41,23 +42,39 @@ def load_test_scenarios() -> dict[str, list[dict[str, Any]]]:
     return yaml.safe_load(_SCENARIOS_PATH.read_text(encoding="utf-8")) or {}
 
 
+@st.cache_resource
+def get_api_client() -> httpx.Client:
+    return httpx.Client(timeout=120.0, trust_env=False)
+
+
 @st.cache_data(ttl=15)
 def fetch_health() -> dict[str, Any]:
-    response = httpx.get(f"{API_BASE_URL}/health", timeout=10.0)
+    response = get_api_client().get(f"{API_BASE_URL}/health", timeout=10.0)
     response.raise_for_status()
     return response.json()
 
 
 @st.cache_data(ttl=30)
 def fetch_schema_summary() -> dict[str, Any]:
-    response = httpx.get(f"{API_BASE_URL}/schema", timeout=15.0)
+    response = get_api_client().get(f"{API_BASE_URL}/schema", timeout=15.0)
     response.raise_for_status()
     return response.json()
 
 
-def request_query(question: str) -> dict[str, Any]:
-    response = httpx.post(
-        f"{API_BASE_URL}/query",
+@st.cache_data(ttl=60)
+def fetch_llm_status(force: bool = False) -> dict[str, Any]:
+    response = get_api_client().get(
+        f"{API_BASE_URL}/llm/status",
+        params={"force": str(force).lower()},
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def submit_query_job(question: str) -> dict[str, Any]:
+    response = get_api_client().post(
+        f"{API_BASE_URL}/query/jobs",
         json={"question": question},
         timeout=120.0,
     )
@@ -65,17 +82,25 @@ def request_query(question: str) -> dict[str, Any]:
     return response.json()
 
 
-def request_seed_load() -> dict[str, Any]:
-    response = httpx.post(f"{API_BASE_URL}/seed/load", timeout=120.0)
+def fetch_query_job(job_id: str) -> dict[str, Any]:
+    response = get_api_client().get(f"{API_BASE_URL}/query/jobs/{job_id}", timeout=30.0)
     response.raise_for_status()
     return response.json()
 
 
-def refresh_system_status() -> None:
+def request_seed_load() -> dict[str, Any]:
+    response = get_api_client().post(f"{API_BASE_URL}/seed/load", timeout=120.0)
+    response.raise_for_status()
+    return response.json()
+
+
+def refresh_system_status(force_llm: bool = False) -> None:
     health_error = ""
     schema_error = ""
+    llm_error = ""
     health_payload: dict[str, Any] | None = None
     schema_payload: dict[str, Any] | None = None
+    llm_payload: dict[str, Any] | None = None
 
     try:
         health_payload = fetch_health()
@@ -87,10 +112,17 @@ def refresh_system_status() -> None:
     except Exception as exc:
         schema_error = str(exc)
 
+    try:
+        llm_payload = fetch_llm_status(force=force_llm)
+    except Exception as exc:
+        llm_error = str(exc)
+
     st.session_state.health_payload = health_payload
     st.session_state.schema_payload = schema_payload
+    st.session_state.llm_payload = llm_payload
     st.session_state.health_error = health_error
     st.session_state.schema_error = schema_error
+    st.session_state.llm_error = llm_error
 
 
 # ------------------------------------------------------------------
@@ -169,6 +201,23 @@ def render_intent(trace: dict[str, Any]) -> None:
         st.caption(intent["reason"])
 
 
+def render_runtime_progress(stage: str, message: str) -> tuple[int, str]:
+    stage_map = {
+        "queued": (5, "请求已提交，等待执行"),
+        "intent_running": (20, "正在识别问题意图"),
+        "intent_done": (30, "意图识别完成，正在准备图谱上下文"),
+        "plan_running": (45, "正在生成执行计划"),
+        "plan_done": (55, "执行计划已就绪，正在生成并执行 Cypher"),
+        "cypher_running": (75, "正在生成并执行 Cypher"),
+        "cypher_done": (85, "Cypher 执行完成，正在整理结果"),
+        "answer_running": (92, "正在生成最终回答"),
+        "answer_done": (98, "最终回答生成完成"),
+        "completed": (100, "知识图谱问答链路执行完成"),
+        "failed": (100, "执行失败"),
+    }
+    return stage_map.get(stage, (10, message or "正在执行知识图谱问答链路"))
+
+
 # ------------------------------------------------------------------
 # Page config & session state
 # ------------------------------------------------------------------
@@ -192,6 +241,10 @@ if "health_error" not in st.session_state:
     st.session_state.health_error = ""
 if "schema_error" not in st.session_state:
     st.session_state.schema_error = ""
+if "llm_payload" not in st.session_state:
+    st.session_state.llm_payload = None
+if "llm_error" not in st.session_state:
+    st.session_state.llm_error = ""
 if "question_input" not in st.session_state:
     default_q = ""
     for case in scenarios.get("baseline", []):
@@ -273,14 +326,16 @@ with st.sidebar:
             st.session_state.seed_message = "种子数据导入完成。"
             fetch_health.clear()
             fetch_schema_summary.clear()
-            refresh_system_status()
+            fetch_llm_status.clear()
+            refresh_system_status(force_llm=True)
         except Exception as exc:
             st.session_state.seed_message = f"导入失败: {exc}"
 
     if st.button("刷新系统状态", use_container_width=True):
         fetch_health.clear()
         fetch_schema_summary.clear()
-        refresh_system_status()
+        fetch_llm_status.clear()
+        refresh_system_status(force_llm=True)
 
 # ------------------------------------------------------------------
 # Status bar
@@ -290,8 +345,10 @@ health_error = st.session_state.health_error
 schema_error = st.session_state.schema_error
 health_payload = st.session_state.health_payload
 schema_payload = st.session_state.schema_payload
+llm_payload = st.session_state.llm_payload
+llm_error = st.session_state.llm_error
 
-info_cols = st.columns(4)
+info_cols = st.columns(6)
 with info_cols[0]:
     if health_payload:
         st.metric("API 状态", health_payload.get("status", "unknown"))
@@ -303,11 +360,32 @@ with info_cols[2]:
     st.metric("实体数", schema_payload.get("entity_count", "-") if schema_payload else "-")
 with info_cols[3]:
     st.metric("关系数", schema_payload.get("relationship_count", "-") if schema_payload else "-")
+with info_cols[4]:
+    if llm_payload and llm_payload.get("connected"):
+        st.metric("LLM 连接", "connected")
+    elif health_payload and health_payload.get("llm_configured"):
+        st.metric("LLM 连接", "configured")
+    else:
+        st.metric("LLM 连接", "unavailable")
+with info_cols[5]:
+    llm_latency = llm_payload.get("latency_ms") if llm_payload else None
+    st.metric("LLM 连通耗时", f"{llm_latency} ms" if llm_latency is not None else "-")
 
 if health_error:
     st.error(f"API 健康检查失败：{health_error}")
 if schema_error:
     st.error(f"Schema 摘要获取失败：{schema_error}")
+if llm_error:
+    st.error(f"LLM 连通检查失败：{llm_error}")
+
+if llm_payload:
+    llm_cols = st.columns([1.4, 2.8, 2.4])
+    with llm_cols[0]:
+        st.caption(f"LLM 状态：{'已连通' if llm_payload.get('connected') else '未连通'}")
+    with llm_cols[1]:
+        st.caption(f"模型：`{llm_payload.get('model', '-')}`")
+    with llm_cols[2]:
+        st.caption(f"网关：`{llm_payload.get('base_url', '-')}`")
 
 if st.session_state.seed_message:
     if "失败" in st.session_state.seed_message:
@@ -343,9 +421,32 @@ if run_query:
         st.session_state.query_payload = None
     else:
         try:
-            with st.spinner("正在执行知识图谱问答链路，请稍候..."):
-                st.session_state.query_payload = request_query(question)
-                st.session_state.query_error = ""
+            progress_text = st.empty()
+            progress_bar = st.progress(0, text="请求已提交，等待执行")
+            job = submit_query_job(question)
+            job_id = job["request_id"]
+            payload = None
+
+            while True:
+                job_state = fetch_query_job(job_id)
+                stage = str(job_state.get("stage", "queued"))
+                message = str(job_state.get("message", "正在执行知识图谱问答链路"))
+                progress_value, progress_label = render_runtime_progress(stage, message)
+                progress_bar.progress(progress_value, text=progress_label)
+                progress_text.caption(f"当前阶段：{message}")
+
+                status = job_state.get("status")
+                if status == "completed":
+                    payload = job_state.get("response")
+                    progress_bar.progress(100, text="知识图谱问答链路执行完成")
+                    progress_text.caption("当前阶段：执行完成")
+                    break
+                if status == "failed":
+                    raise RuntimeError(job_state.get("error") or message)
+                time.sleep(0.25)
+
+            st.session_state.query_payload = payload
+            st.session_state.query_error = ""
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text
             try:

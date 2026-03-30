@@ -9,10 +9,28 @@ import httpx
 from kgqa.config import Settings
 from kgqa.models import LLMResponse
 
+_CLIENT_CACHE: dict[tuple[str, str], httpx.Client] = {}
+
+
+def get_http_client(settings: Settings) -> httpx.Client:
+    key = (settings.llm_base_url, settings.llm_api_key)
+    client = _CLIENT_CACHE.get(key)
+    if client is None:
+        client = httpx.Client(timeout=60.0)
+        _CLIENT_CACHE[key] = client
+    return client
+
+
+def close_all_llm_clients() -> None:
+    for client in _CLIENT_CACHE.values():
+        client.close()
+    _CLIENT_CACHE.clear()
+
 
 class LLMClient:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.client = get_http_client(settings)
 
     def generate(self, prompt: str, system_prompt: str = "You are a helpful assistant.") -> LLMResponse:
         if not self.settings.has_llm:
@@ -32,7 +50,7 @@ class LLMClient:
             "Content-Type": "application/json",
         }
         url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
-        response = httpx.post(url, headers=headers, json=payload, timeout=60.0)
+        response = self.client.post(url, headers=headers, json=payload)
         response.raise_for_status()
         body = response.json()
         content = body["choices"][0]["message"]["content"]

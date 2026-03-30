@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from threading import Lock
+from typing import Any, Callable
 
 from kgqa.config import Settings
 from kgqa.generator import AnswerGenerator
@@ -26,6 +27,38 @@ from kgqa.router import IntentRouter
 from kgqa.schema import SchemaRegistry
 from kgqa.serializer import ResultSerializer
 
+_SERVICE_CACHE: dict[tuple[str, str, str, str, str, str, str], "KGQAService"] = {}
+_SERVICE_CACHE_LOCK = Lock()
+
+
+def _service_cache_key(settings: Settings) -> tuple[str, str, str, str, str, str, str]:
+    return (
+        settings.neo4j_uri,
+        settings.neo4j_username,
+        settings.neo4j_password,
+        settings.llm_base_url,
+        settings.llm_api_key,
+        settings.llm_model,
+        settings.dataset_name,
+    )
+
+
+def get_kgqa_service(settings: Settings) -> "KGQAService":
+    key = _service_cache_key(settings)
+    service = _SERVICE_CACHE.get(key)
+    if service is not None:
+        return service
+    with _SERVICE_CACHE_LOCK:
+        service = _SERVICE_CACHE.get(key)
+        if service is None:
+            service = KGQAService(settings)
+            _SERVICE_CACHE[key] = service
+        return service
+
+
+def close_all_kgqa_services() -> None:
+    _SERVICE_CACHE.clear()
+
 
 class KGQAService:
     def __init__(self, settings: Settings):
@@ -48,11 +81,27 @@ class KGQAService:
             executor.load_seed_data(seed_text)
         finally:
             executor.close()
+        self.domain.load()
 
-    def process_question(self, question: str) -> QueryResponse:
+    @staticmethod
+    def _notify_progress(
+        progress_callback: Callable[[str, str], None] | None,
+        stage: str,
+        message: str,
+    ) -> None:
+        if progress_callback:
+            progress_callback(stage, message)
+
+    def process_question(
+        self,
+        question: str,
+        progress_callback: Callable[[str, str], None] | None = None,
+    ) -> QueryResponse:
         started = time.perf_counter()
 
+        self._notify_progress(progress_callback, "intent_running", "正在识别问题意图")
         intent_result, intent_trace = self._resolve_intent(question)
+        self._notify_progress(progress_callback, "intent_done", "意图识别完成，正在准备图谱上下文")
         schema_context = self.schema.render_schema_context(
             question=question,
             intent=intent_result.intent,
@@ -60,11 +109,22 @@ class KGQAService:
             filters=intent_result.filters,
         )
         few_shots = self.schema.few_shots_for_intent(intent_result.intent, question=question)
+        self._notify_progress(progress_callback, "plan_running", "正在生成执行计划")
         plan, plan_trace = self._resolve_plan(question, intent_result, schema_context)
-        cypher_text, rows, cypher_trace = self._execute_plan(question, plan, intent_result, schema_context, few_shots)
+        self._notify_progress(progress_callback, "plan_done", "执行计划已就绪，正在生成并执行 Cypher")
+        cypher_text, rows, cypher_trace = self._execute_plan(
+            question,
+            plan,
+            intent_result,
+            schema_context,
+            few_shots,
+            progress_callback=progress_callback,
+        )
 
         serialized = self.serializer.serialize(rows, question, intent_result.intent)
+        self._notify_progress(progress_callback, "answer_running", "查询完成，正在生成最终回答")
         answer, answer_trace = self._resolve_answer(question, intent_result, serialized)
+        self._notify_progress(progress_callback, "answer_done", "最终回答生成完成")
         total_latency_ms = int((time.perf_counter() - started) * 1000)
         trace = ExecutionTrace(
             intent=intent_trace,
@@ -140,6 +200,7 @@ class KGQAService:
         intent_result: IntentResult,
         schema_context: str,
         few_shots: list[dict[str, str]],
+        progress_callback: Callable[[str, str], None] | None = None,
     ) -> tuple[str | None, list[dict[str, Any]], CypherTrace]:
         context: dict[str, Any] = {}
         last_cypher: str | None = None
@@ -148,6 +209,9 @@ class KGQAService:
         final_trace = CypherTrace(source=SourceType.NONE, reason="no cypher executed")
 
         for step in plan.steps[:5]:
+            step_index = plan.steps.index(step) + 1
+            step_desc = f"步骤 {step_index}/{len(plan.steps)}"
+            self._notify_progress(progress_callback, "cypher_running", f"{step_desc}：正在生成 Cypher")
             try:
                 resolved_question = step.question.format(**context)
             except KeyError as exc:
@@ -179,6 +243,7 @@ class KGQAService:
                 step_schema_context,
                 step_few_shots,
             )
+            self._notify_progress(progress_callback, "cypher_done", f"{step_desc}：Cypher 执行完成")
             last_cypher = cypher
             last_rows = rows
             step_rows[step.id] = rows
