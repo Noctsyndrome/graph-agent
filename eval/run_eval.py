@@ -14,25 +14,30 @@ import yaml
 from kgqa.agent import get_kgqa_agent
 from kgqa.config import Settings, get_settings
 from kgqa.models import ChatRequest
+from kgqa.scenario import build_scenario_settings, get_scenario_definition
 from kgqa.schema import SchemaRegistry
 from kgqa.session import clear_sessions, get_session_payload
 
 
-def run_evaluation() -> Path:
-    settings = get_settings()
+def run_evaluation(scenario_id: str | None = None) -> Path:
+    base_settings = get_settings()
+    scenario = get_scenario_definition(scenario_id)
+    settings = build_scenario_settings(base_settings, scenario)
     scenarios = yaml.safe_load(settings.evaluation_file.read_text(encoding="utf-8"))
-    rows = _run_all(settings, scenarios)
+    rows = _run_all(settings, scenario.scenario_id, scenarios)
     report = _build_html(rows)
-    settings.report_file.write_text(report, encoding="utf-8")
-    return settings.report_file
+    report_path = settings.report_file.with_name(f"{settings.report_file.stem}-{scenario.scenario_id}{settings.report_file.suffix}")
+    report_path.write_text(report, encoding="utf-8")
+    return report_path
 
 
 def _run_all(
     settings: Settings,
+    scenario_id: str,
     scenarios: dict,
 ) -> list[dict[str, object]]:
     clear_sessions()
-    agent = get_kgqa_agent(settings)
+    agent = get_kgqa_agent(get_settings(), get_scenario_definition(scenario_id))
     rows: list[dict[str, object]] = []
     all_cases: list[tuple[str, dict]] = []
     for group_name in ("baseline", "challenge", "generalization"):
@@ -57,6 +62,7 @@ def run_case(agent, settings: Settings, group_name: str, case: dict[str, object]
             agent.stream_chat(
                 ChatRequest(
                     threadId=session_id,
+                    scenarioId=scenario_id,
                     messages=[{"id": "u1", "role": "user", "content": str(case["question"])}],
                     state={},
                 )
@@ -322,6 +328,7 @@ def _detail_rows_html(rows: list[dict[str, object]]) -> str:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="KG-QA PoC Evaluation")
+    parser.add_argument("--scenario", default=None, help="Scenario id to evaluate, e.g. hvac or elevator")
     args = parser.parse_args()
-    path = run_evaluation()
+    path = run_evaluation(scenario_id=args.scenario)
     print(f"Report generated at {path}")

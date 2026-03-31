@@ -5,6 +5,13 @@ export interface HealthPayload {
   llm_model: string;
 }
 
+export interface ScenarioSummary {
+  id: string;
+  label: string;
+  description: string;
+  dataset_name: string;
+}
+
 export interface LlmStatusPayload {
   configured: boolean;
   connected: boolean;
@@ -39,6 +46,9 @@ export interface ExampleGroup {
 export interface ChatSessionSummary {
   session_id: string;
   title: string;
+  scenario_id: string;
+  scenario_label: string;
+  dataset_name: string;
   created_at: number;
   updated_at: number;
   message_count: number;
@@ -48,6 +58,9 @@ export interface ChatSessionSummary {
 export interface ChatSessionPayload {
   session_id: string;
   title: string;
+  scenario_id: string;
+  scenario_label: string;
+  dataset_name: string;
   created_at: number;
   updated_at: number;
   messages: BackendChatMessage[];

@@ -27,6 +27,9 @@ def _derive_title(messages: list[dict[str, Any]], fallback: str = "新会话") -
 
 def upsert_session(
     session_id: str,
+    scenario_id: str,
+    scenario_label: str,
+    dataset_name: str,
     messages: list[dict[str, Any]] | None = None,
     state: dict[str, Any] | None = None,
     status: str | None = None,
@@ -38,6 +41,9 @@ def upsert_session(
             record = ChatSessionRecord(
                 session_id=session_id,
                 title=_derive_title(messages or []),
+                scenario_id=scenario_id,
+                scenario_label=scenario_label,
+                dataset_name=dataset_name,
                 created_at=now,
                 updated_at=now,
                 messages=messages or [],
@@ -48,6 +54,9 @@ def upsert_session(
             return record
 
         updated = existing.model_copy(deep=True)
+        updated.scenario_id = scenario_id
+        updated.scenario_label = scenario_label
+        updated.dataset_name = dataset_name
         if messages is not None:
             updated.messages = messages
             updated.title = _derive_title(messages, fallback=existing.title)
@@ -77,6 +86,9 @@ def list_sessions() -> list[ChatSessionSummary]:
             ChatSessionSummary(
                 session_id=record.session_id,
                 title=record.title,
+                scenario_id=record.scenario_id,
+                scenario_label=record.scenario_label,
+                dataset_name=record.dataset_name,
                 created_at=record.created_at,
                 updated_at=record.updated_at,
                 message_count=len(record.messages),
@@ -93,6 +105,9 @@ def get_session_payload(session_id: str) -> ChatSessionPayload | None:
     return ChatSessionPayload(
         session_id=record.session_id,
         title=record.title,
+        scenario_id=record.scenario_id,
+        scenario_label=record.scenario_label,
+        dataset_name=record.dataset_name,
         created_at=record.created_at,
         updated_at=record.updated_at,
         messages=record.messages,
@@ -101,6 +116,15 @@ def get_session_payload(session_id: str) -> ChatSessionPayload | None:
     )
 
 
-def clear_sessions() -> None:
+def clear_sessions(scenario_id: str | None = None) -> None:
     with _SESSION_LOCK:
-        _SESSION_STORE.clear()
+        if scenario_id is None:
+            _SESSION_STORE.clear()
+            return
+        removable = [
+            session_key
+            for session_key, record in _SESSION_STORE.items()
+            if record.scenario_id == scenario_id
+        ]
+        for session_key in removable:
+            _SESSION_STORE.pop(session_key, None)

@@ -6,6 +6,7 @@ import type {
   ExampleGroup,
   HealthPayload,
   LlmStatusPayload,
+  ScenarioSummary,
   SchemaSummaryPayload,
 } from "./types";
 
@@ -31,8 +32,13 @@ export function fetchLlmStatus(): Promise<LlmStatusPayload> {
   return readJson<LlmStatusPayload>("/llm/status");
 }
 
-export function fetchSchemaSummary(): Promise<SchemaSummaryPayload> {
-  return readJson<SchemaSummaryPayload>("/schema");
+export function fetchScenarios(): Promise<ScenarioSummary[]> {
+  return readJson<ScenarioSummary[]>("/scenarios");
+}
+
+export function fetchSchemaSummary(scenarioId?: string): Promise<SchemaSummaryPayload> {
+  const suffix = scenarioId ? `?scenario_id=${encodeURIComponent(scenarioId)}` : "";
+  return readJson<SchemaSummaryPayload>(`/schema${suffix}`);
 }
 
 export function fetchSessions(): Promise<ChatSessionSummary[]> {
@@ -47,6 +53,7 @@ export async function streamChat(
   sessionId: string,
   messages: BackendChatMessage[],
   state: Record<string, unknown>,
+  scenarioId: string | undefined,
   onEvent: (event: ChatStreamEvent) => void,
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/chat`, {
@@ -56,6 +63,7 @@ export async function streamChat(
     },
     body: JSON.stringify({
       threadId: sessionId,
+      scenarioId,
       messages,
       state,
     }),
@@ -144,7 +152,8 @@ function groupDescription(name: string): string {
   }
 }
 
-export async function fetchExampleGroups(): Promise<ExampleGroup[]> {
-  const payload = await readJson<Record<string, unknown>>("/examples");
+export async function fetchExampleGroups(scenarioId?: string): Promise<ExampleGroup[]> {
+  const suffix = scenarioId ? `?scenario_id=${encodeURIComponent(scenarioId)}` : "";
+  const payload = await readJson<Record<string, unknown>>(`/examples${suffix}`);
   return normalizeExampleGroups(payload);
 }

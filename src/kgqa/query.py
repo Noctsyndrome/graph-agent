@@ -3,7 +3,9 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
+import yaml
 from neo4j import Driver, GraphDatabase
+from neo4j.graph import Node, Path, Relationship
 
 from kgqa.config import Settings
 import re
@@ -87,6 +89,35 @@ class Neo4jExecutor:
             return [cls._normalize_value(item) for item in value]
         if isinstance(value, tuple):
             return tuple(cls._normalize_value(item) for item in value)
+        if isinstance(value, Node):
+            return {
+                "__type__": "node",
+                "element_id": value.element_id,
+                "labels": sorted(str(label) for label in value.labels),
+                "properties": {
+                    key: cls._normalize_value(item)
+                    for key, item in value.items()
+                },
+            }
+        if isinstance(value, Relationship):
+            rel_type = value.type if not callable(value.type) else value.type()
+            return {
+                "__type__": "relationship",
+                "element_id": value.element_id,
+                "relationship_type": str(rel_type),
+                "start_node_element_id": value.start_node.element_id,
+                "end_node_element_id": value.end_node.element_id,
+                "properties": {
+                    key: cls._normalize_value(item)
+                    for key, item in value.items()
+                },
+            }
+        if isinstance(value, Path):
+            return {
+                "__type__": "path",
+                "nodes": [cls._normalize_value(node) for node in value.nodes],
+                "relationships": [cls._normalize_value(rel) for rel in value.relationships],
+            }
         if isinstance(value, (dt.date, dt.datetime, dt.time)):
             return value.isoformat()
         if value.__class__.__module__.startswith("neo4j.time"):
@@ -117,77 +148,145 @@ class CypherSafetyValidator:
 
 
 class DomainRegistry:
-    """Domain-specific entity values loaded dynamically from Neo4j at startup."""
+    """Schema-driven distinct values loaded dynamically from Neo4j at startup."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self._customers: list[str] = []
-        self._brands: list[str] = []
-        self._cities: list[str] = []
-        self._project_types: list[str] = []
-        self._project_statuses: list[str] = []
-        self._categories: list[str] = []
-        self._refrigerants: list[str] = []
+        self._schema = yaml.safe_load(settings.schema_file.read_text(encoding="utf-8")) or {}
+        self._values: dict[str, dict[str, list[str]]] = {}
 
     def load(self) -> None:
         executor = Neo4jExecutor(self.settings)
         ds = self.settings.dataset_name
-        self._customers = self._flat(executor, f"MATCH (c:Customer {{dataset: '{ds}'}}) RETURN c.name AS v ORDER BY v")
-        self._brands = self._flat(executor, f"MATCH (m:Model {{dataset: '{ds}'}}) RETURN DISTINCT m.brand AS v ORDER BY v")
-        self._cities = self._flat(executor, f"MATCH (p:Project {{dataset: '{ds}'}}) RETURN DISTINCT p.city AS v ORDER BY v")
-        self._project_types = self._flat(executor, f"MATCH (p:Project {{dataset: '{ds}'}}) RETURN DISTINCT p.type AS v ORDER BY v")
-        self._project_statuses = self._flat(executor, f"MATCH (p:Project {{dataset: '{ds}'}}) RETURN DISTINCT p.status AS v ORDER BY v")
-        self._categories = self._flat(executor, f"MATCH (c:Category {{dataset: '{ds}'}}) WHERE c.parent_id IS NOT NULL RETURN c.name AS v ORDER BY v")
-        self._refrigerants = self._flat(executor, f"MATCH (m:Model {{dataset: '{ds}'}}) RETURN DISTINCT m.refrigerant AS v ORDER BY v")
+        values: dict[str, dict[str, list[str]]] = {}
+        for entity in self._schema.get("entities", []):
+            entity_name = str(entity.get("name", "")).strip()
+            if not entity_name:
+                continue
+            field_map: dict[str, list[str]] = {}
+            for field_name in entity.get("filterable_fields", []):
+                field = str(field_name).strip()
+                if not field or not self._should_load_field(field):
+                    continue
+                rows = self._flat(
+                    executor,
+                    f"MATCH (n:{entity_name} {{dataset: '{ds}'}}) RETURN DISTINCT n.{field} AS v ORDER BY v",
+                )
+                if rows:
+                    field_map[field] = rows
+            values[entity_name] = field_map
+        self._values = values
 
     @staticmethod
     def _flat(executor: Neo4jExecutor, cypher: str) -> list[str]:
         return [str(row["v"]) for row in executor.query(cypher) if row.get("v")]
 
+    @staticmethod
+    def _should_load_field(field_name: str) -> bool:
+        normalized = field_name.strip().lower()
+        if normalized in {"id", "dataset"}:
+            return False
+        return not normalized.endswith("_id")
+
+    def as_dict(self) -> dict[str, dict[str, list[str]]]:
+        return {
+            entity_name: {field_name: list(values) for field_name, values in field_map.items()}
+            for entity_name, field_map in self._values.items()
+        }
+
+    def get_values(self, entity_name: str, field_name: str) -> list[str]:
+        return list(self._values.get(entity_name, {}).get(field_name, []))
+
+    def get_filtered(self, key: str) -> dict[str, dict[str, list[str]]]:
+        normalized = key.strip()
+        if not normalized:
+            return {}
+        alias_entity, alias_field = self._resolve_alias(normalized)
+        if alias_entity and alias_field:
+            return {alias_entity: {alias_field: self.get_values(alias_entity, alias_field)}}
+        if "." not in normalized:
+            entity_name = self._resolve_entity_name(normalized)
+            if entity_name is not None:
+                return {entity_name: self.as_dict().get(entity_name, {})}
+            return {}
+        entity_key, field_key = normalized.split(".", 1)
+        entity_name = self._resolve_entity_name(entity_key)
+        if entity_name is None:
+            return {}
+        field_name = self._resolve_field_name(entity_name, field_key)
+        if field_name is None:
+            return {entity_name: {}}
+        values = self.get_values(entity_name, field_name)
+        return {entity_name: {field_name: values}}
+
+    @staticmethod
+    def _resolve_alias(key: str) -> tuple[str | None, str | None]:
+        alias_map = {
+            "customers": ("Customer", "name"),
+            "brands": ("Model", "brand"),
+            "cities": ("Project", "city"),
+            "project_types": ("Project", "type"),
+            "project_statuses": ("Project", "status"),
+            "categories": ("Category", "name"),
+            "refrigerants": ("Model", "refrigerant"),
+        }
+        return alias_map.get(key, (None, None))
+
+    def _resolve_entity_name(self, entity_key: str) -> str | None:
+        normalized = entity_key.strip().lower()
+        for entity_name in self._values:
+            if entity_name.lower() == normalized:
+                return entity_name
+        return None
+
+    def _resolve_field_name(self, entity_name: str, field_key: str) -> str | None:
+        normalized = field_key.strip().lower()
+        for field_name in self._values.get(entity_name, {}):
+            if field_name.lower() == normalized:
+                return field_name
+        return None
+
     @property
     def customers(self) -> list[str]:
-        return self._customers
+        return self.get_values("Customer", "name")
 
     @property
     def brands(self) -> list[str]:
-        return self._brands
+        return self.get_values("Model", "brand")
 
     @property
     def cities(self) -> list[str]:
-        return self._cities
+        return self.get_values("Project", "city")
 
     @property
     def project_types(self) -> list[str]:
-        return self._project_types
+        return self.get_values("Project", "type")
 
     @property
     def project_statuses(self) -> list[str]:
-        return self._project_statuses
+        return self.get_values("Project", "status")
 
     @property
     def categories(self) -> list[str]:
-        return self._categories
+        return self.get_values("Category", "name")
 
     @property
     def refrigerants(self) -> list[str]:
-        return self._refrigerants
+        return self.get_values("Model", "refrigerant")
 
     def prompt_summary(self) -> str:
-        sections = [
-            ("客户名", self.customers),
-            ("品牌", self.brands),
-            ("城市", self.cities),
-            ("项目类型", self.project_types),
-            ("项目状态", self.project_statuses),
-            ("设备类别", self.categories),
-            ("制冷剂", self.refrigerants),
-        ]
         lines = ["## 当前图谱中的关键枚举值"]
-        for label, values in sections:
-            if not values:
-                continue
-            preview = "、".join(values[:10])
-            suffix = " ..." if len(values) > 10 else ""
-            lines.append(f"- {label}: {preview}{suffix}")
+        descriptions = {
+            str(item.get("name", "")): str(item.get("description", item.get("name", "")))
+            for item in self._schema.get("entities", [])
+        }
+        for entity_name, field_map in self._values.items():
+            entity_label = descriptions.get(entity_name, entity_name)
+            for field_name, values in field_map.items():
+                if not values:
+                    continue
+                preview = "、".join(values[:10])
+                suffix = " ..." if len(values) > 10 else ""
+                lines.append(f"- {entity_label}.{field_name}: {preview}{suffix}")
         return "\n".join(lines)
 

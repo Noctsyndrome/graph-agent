@@ -12,8 +12,9 @@ from kgqa.config import get_settings
 from kgqa.llm import LLMClient, close_all_llm_clients
 from kgqa.models import ChatRequest
 from kgqa.query import Neo4jExecutor, close_all_neo4j_drivers, load_seed_data
+from kgqa.scenario import get_scenario_definition, list_scenarios
 from kgqa.schema import SchemaRegistry
-from kgqa.session import clear_sessions, get_session_payload, list_sessions
+from kgqa.session import clear_sessions, get_session, get_session_payload, list_sessions
 
 settings = get_settings()
 app = FastAPI(title="kg-qa-poc", version="0.1.0")
@@ -79,11 +80,17 @@ def _get_llm_status_payload(force: bool = False) -> dict[str, object]:
     return dict(payload)
 
 
+def _resolve_scenario(scenario_id: str | None = None):
+    try:
+        return get_scenario_definition(scenario_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.on_event("startup")
 def startup_event() -> None:
     executor = Neo4jExecutor(settings)
     executor.warmup()
-    get_kgqa_agent(settings)
 
 
 @app.on_event("shutdown")
@@ -96,9 +103,10 @@ def shutdown_event() -> None:
 
 @app.get("/health")
 def health() -> dict[str, object]:
+    default_scenario = get_scenario_definition()
     return {
         "status": "ok",
-        "dataset": settings.dataset_name,
+        "dataset": default_scenario.dataset_name,
         "llm_configured": settings.has_llm,
         "llm_model": settings.llm_model,
     }
@@ -109,28 +117,51 @@ def llm_status(force: bool = False) -> dict[str, object]:
     return _get_llm_status_payload(force=force)
 
 
+@app.get("/scenarios")
+def scenarios() -> list[dict[str, str]]:
+    return [scenario.to_payload() for scenario in list_scenarios()]
+
+
 @app.get("/schema")
-def schema_summary() -> dict[str, object]:
-    return SchemaRegistry(settings, domain=get_kgqa_agent(settings).domain).summary()
+def schema_summary(scenario_id: str | None = None) -> dict[str, object]:
+    scenario = _resolve_scenario(scenario_id)
+    scenario_settings = settings.model_copy(
+        update={
+            "dataset_name": scenario.dataset_name,
+            "schema_file": scenario.schema_file,
+            "seed_file": scenario.seed_file,
+            "evaluation_file": scenario.evaluation_file,
+        }
+    )
+    return SchemaRegistry(scenario_settings, domain=get_kgqa_agent(settings, scenario).domain).summary()
 
 
 @app.get("/examples")
-def examples() -> dict[str, object]:
-    scenarios = yaml.safe_load(settings.evaluation_file.read_text(encoding="utf-8")) or {}
-    return scenarios
+def examples(scenario_id: str | None = None) -> dict[str, object]:
+    scenario = _resolve_scenario(scenario_id)
+    return yaml.safe_load(scenario.evaluation_file.read_text(encoding="utf-8")) or {}
 
 
 @app.post("/seed/load")
-def seed_load() -> dict[str, str]:
+def seed_load(scenario_id: str | None = None) -> dict[str, str]:
+    scenario = _resolve_scenario(scenario_id)
+    scenario_settings = settings.model_copy(
+        update={
+            "dataset_name": scenario.dataset_name,
+            "schema_file": scenario.schema_file,
+            "seed_file": scenario.seed_file,
+            "evaluation_file": scenario.evaluation_file,
+        }
+    )
     try:
-        load_seed_data(settings)
+        load_seed_data(scenario_settings)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    clear_sessions()
+    clear_sessions(scenario_id=scenario.scenario_id)
     close_all_kgqa_agents()
     _LLM_STATUS_CACHE["checked_at"] = 0.0
     _LLM_STATUS_CACHE["payload"] = None
-    return {"status": "loaded"}
+    return {"status": "loaded", "scenario_id": scenario.scenario_id}
 
 
 @app.get("/chat/sessions")
@@ -148,7 +179,15 @@ def chat_session_messages(session_id: str) -> dict[str, object]:
 
 @app.post("/chat")
 def chat(request: ChatRequest) -> StreamingResponse:
-    agent = get_kgqa_agent(settings)
+    existing_session = get_session(request.threadId) if request.threadId else None
+    if existing_session is not None:
+        scenario = _resolve_scenario(existing_session.scenario_id)
+        if request.scenarioId and request.scenarioId != existing_session.scenario_id:
+            raise HTTPException(status_code=409, detail="Scenario is locked for this session.")
+    else:
+        scenario = _resolve_scenario(request.scenarioId)
+    request = request.model_copy(update={"scenarioId": scenario.scenario_id})
+    agent = get_kgqa_agent(settings, scenario)
 
     def event_stream() -> object:
         for event in agent.stream_chat(request):

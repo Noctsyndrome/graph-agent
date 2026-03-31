@@ -27,6 +27,7 @@ import {
   fetchHealth,
   fetchLlmStatus,
   fetchSchemaSummary,
+  fetchScenarios,
   fetchSessionPayload,
   fetchSessions,
   streamChat,
@@ -39,14 +40,18 @@ import type {
   ExampleGroup,
   HealthPayload,
   LlmStatusPayload,
+  ScenarioSummary,
   SchemaSummaryPayload,
 } from "./types";
 
-function createEmptySession(sessionId: string): ChatSessionPayload {
+function createEmptySession(sessionId: string, scenario: ScenarioSummary | null = null): ChatSessionPayload {
   const now = Date.now() / 1000;
   return {
     session_id: sessionId,
     title: "新会话",
+    scenario_id: scenario?.id ?? "",
+    scenario_label: scenario?.label ?? "",
+    dataset_name: scenario?.dataset_name ?? "",
     created_at: now,
     updated_at: now,
     messages: [],
@@ -84,7 +89,7 @@ function sessionTitleFromPayload(payload: ChatSessionPayload): string {
   if (typeof userMessage?.content === "string" && userMessage.content.trim()) {
     return userMessage.content.trim().slice(0, 32);
   }
-  return "新会话";
+  return payload.scenario_label ? `${payload.scenario_label}会话` : "新会话";
 }
 
 function countVisibleMessages(messages: BackendChatMessage[]): number {
@@ -246,12 +251,53 @@ function StatusItem({
   );
 }
 
+function ScenarioPickerDialog({
+  open,
+  scenarios,
+  onOpenChange,
+  onSelect,
+}: {
+  open: boolean;
+  scenarios: ScenarioSummary[];
+  onOpenChange: (open: boolean) => void;
+  onSelect: (scenario: ScenarioSummary) => void;
+}) {
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="scenario-overlay" />
+        <Dialog.Content className="scenario-dialog">
+          <div className="scenario-dialog-header">
+            <Dialog.Title>选择图谱场景</Dialog.Title>
+            <Dialog.Description>新会话会绑定到所选场景，开始对话后不可修改。</Dialog.Description>
+          </div>
+          <div className="scenario-grid">
+            {scenarios.map((scenario) => (
+              <button
+                key={scenario.id}
+                type="button"
+                className="scenario-card"
+                onClick={() => onSelect(scenario)}
+              >
+                <div className="scenario-card-title">{scenario.label}</div>
+                <div className="scenario-card-copy">{scenario.description}</div>
+                <div className="scenario-card-meta">{scenario.dataset_name}</div>
+              </button>
+            ))}
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 export default function App() {
   const initialSessionId = useRef(crypto.randomUUID()).current;
   const [health, setHealth] = useState<HealthPayload | null>(null);
   const [llmStatus, setLlmStatus] = useState<LlmStatusPayload | null>(null);
   const [schemaSummary, setSchemaSummary] = useState<SchemaSummaryPayload | null>(null);
   const [exampleGroups, setExampleGroups] = useState<ExampleGroup[]>([]);
+  const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>(initialSessionId);
   const [sessionPayload, setSessionPayload] = useState<ChatSessionPayload>(() => createEmptySession(initialSessionId));
@@ -261,6 +307,7 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [statusText, setStatusText] = useState("准备就绪");
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [scenarioPickerOpen, setScenarioPickerOpen] = useState(false);
   const [, setLoadingState] = useState("正在加载系统状态");
   const [globalError, setGlobalError] = useState<string | null>(null);
 
@@ -280,20 +327,32 @@ export default function App() {
     threadStateRef.current = threadState;
   }, [threadState]);
 
+  const refreshScenarioMeta = useCallback(async (scenarioId: string) => {
+    if (!scenarioId) {
+      setSchemaSummary(null);
+      setExampleGroups([]);
+      return;
+    }
+    const [nextSchema, nextExamples] = await Promise.all([
+      fetchSchemaSummary(scenarioId),
+      fetchExampleGroups(scenarioId),
+    ]);
+    setSchemaSummary(nextSchema);
+    setExampleGroups(nextExamples);
+  }, []);
+
   const refreshMeta = useCallback(async () => {
     setLoadingState("正在刷新系统状态");
     setGlobalError(null);
     try {
-      const [nextHealth, nextLlmStatus, nextSchema, nextExamples] = await Promise.all([
+      const [nextHealth, nextLlmStatus, nextScenarios] = await Promise.all([
         fetchHealth(),
         fetchLlmStatus(),
-        fetchSchemaSummary(),
-        fetchExampleGroups(),
+        fetchScenarios(),
       ]);
       setHealth(nextHealth);
       setLlmStatus(nextLlmStatus);
-      setSchemaSummary(nextSchema);
-      setExampleGroups(nextExamples);
+      setScenarios(nextScenarios);
       setLoadingState("");
     } catch (error) {
       setGlobalError(error instanceof Error ? error.message : String(error));
@@ -310,39 +369,52 @@ export default function App() {
     }
   }, []);
 
-  const hydrateSession = useCallback(async (sessionId: string, showLoading = true) => {
-    if (showLoading) {
-      setLoadingState("正在恢复会话");
-    }
-    setGlobalError(null);
-    try {
-      const payload = await fetchSessionPayload(sessionId);
+  const hydrateSession = useCallback(
+    async (sessionId: string, showLoading = true) => {
+      if (showLoading) {
+        setLoadingState("正在恢复会话");
+      }
+      setGlobalError(null);
+      try {
+        const payload = await fetchSessionPayload(sessionId);
+        setCurrentSessionId(sessionId);
+        setSessionPayload(payload);
+        setRawMessages(payload.messages);
+        setThreadState(payload.state ?? {});
+        setSelectedToolCall(null);
+        setStatusText(payload.status === "running" ? "正在恢复执行状态" : "准备就绪");
+        setIsRunning(payload.status === "running");
+        setScenarioPickerOpen(false);
+        await refreshScenarioMeta(payload.scenario_id);
+        setLoadingState("");
+      } catch (error) {
+        setGlobalError(error instanceof Error ? error.message : String(error));
+        setLoadingState("");
+      }
+    },
+    [refreshScenarioMeta],
+  );
+
+  const startScenarioSession = useCallback(
+    async (scenario: ScenarioSummary) => {
+      const sessionId = crypto.randomUUID();
+      const payload = createEmptySession(sessionId, scenario);
       setCurrentSessionId(sessionId);
       setSessionPayload(payload);
-      setRawMessages(payload.messages);
-      setThreadState(payload.state ?? {});
+      setRawMessages([]);
+      setThreadState({});
       setSelectedToolCall(null);
-      setStatusText(payload.status === "running" ? "正在恢复执行状态" : "准备就绪");
-      setIsRunning(payload.status === "running");
-      setLoadingState("");
-    } catch (error) {
-      setGlobalError(error instanceof Error ? error.message : String(error));
-      setLoadingState("");
-    }
-  }, []);
+      setStatusText("准备就绪");
+      setIsRunning(false);
+      setGlobalError(null);
+      setScenarioPickerOpen(false);
+      await refreshScenarioMeta(scenario.id);
+    },
+    [refreshScenarioMeta],
+  );
 
-  const createSession = useCallback(() => {
-    const sessionId = crypto.randomUUID();
-    const payload = createEmptySession(sessionId);
-    setCurrentSessionId(sessionId);
-    setSessionPayload(payload);
-    setRawMessages([]);
-    setThreadState({});
-    setSelectedToolCall(null);
-    setStatusText("准备就绪");
-    setIsRunning(false);
-    setGlobalError(null);
-    setLoadingState("");
+  const openScenarioPicker = useCallback(() => {
+    setScenarioPickerOpen(true);
   }, []);
 
   useEffect(() => {
@@ -352,12 +424,21 @@ export default function App() {
     })();
   }, [refreshMeta, refreshSessions]);
 
+  useEffect(() => {
+    if (!scenarios.length) {
+      return;
+    }
+    if (!sessionPayload.scenario_id && rawMessages.length === 0) {
+      setScenarioPickerOpen(true);
+    }
+  }, [rawMessages.length, scenarios, sessionPayload.scenario_id]);
+
   const threadMessages = useMemo(() => rawMessagesToThreadMessages(rawMessages), [rawMessages]);
   const currentTitle = sessionTitleFromPayload(sessionPayload);
   const visibleMessageCount = countVisibleMessages(rawMessages);
   const suggestionCards = useMemo(
-    () => pickSuggestionPool(exampleGroups, `${currentSessionId}:all-examples`),
-    [currentSessionId, exampleGroups],
+    () => pickSuggestionPool(exampleGroups, `${currentSessionId}:${sessionPayload.scenario_id}:all-examples`),
+    [currentSessionId, exampleGroups, sessionPayload.scenario_id],
   );
   const activeToolSelection = selectedToolCall ?? null;
 
@@ -403,6 +484,10 @@ export default function App() {
       if (!text || isRunning) {
         return;
       }
+      if (!sessionPayload.scenario_id) {
+        setScenarioPickerOpen(true);
+        return;
+      }
 
       setGlobalError(null);
       setStatusText("正在准备执行");
@@ -412,7 +497,13 @@ export default function App() {
       setRawMessages(nextRawMessages);
 
       try {
-        await streamChat(currentSessionIdRef.current, nextRawMessages, threadStateRef.current, handleStreamEvent);
+        await streamChat(
+          currentSessionIdRef.current,
+          nextRawMessages,
+          threadStateRef.current,
+          sessionPayload.scenario_id || undefined,
+          handleStreamEvent,
+        );
         await refreshSessions();
         const payload = await fetchSessionPayload(currentSessionIdRef.current);
         setSessionPayload(payload);
@@ -423,7 +514,7 @@ export default function App() {
         setGlobalError(error instanceof Error ? error.message : String(error));
       }
     },
-    [handleStreamEvent, isRunning, refreshSessions, syncSnapshotState],
+    [handleStreamEvent, isRunning, refreshSessions, sessionPayload.scenario_id, syncSnapshotState],
   );
 
   const handleComposerSubmit = useCallback(
@@ -442,6 +533,9 @@ export default function App() {
       {
         session_id: sessionPayload.session_id,
         title: currentTitle,
+        scenario_id: sessionPayload.scenario_id,
+        scenario_label: sessionPayload.scenario_label,
+        dataset_name: sessionPayload.dataset_name,
         created_at: sessionPayload.created_at,
         updated_at: sessionPayload.updated_at,
         message_count: visibleMessageCount,
@@ -453,11 +547,22 @@ export default function App() {
 
   const graphSummary = schemaSummary
     ? `${schemaSummary.entity_count} 实体 / ${schemaSummary.relationship_count} 关系`
-    : "等待图谱摘要";
+    : sessionPayload.scenario_id
+      ? "等待图谱摘要"
+      : "请先选择场景";
   const neo4jConnected = Boolean(schemaSummary);
 
   return (
     <div className="app-shell">
+      <ScenarioPickerDialog
+        open={scenarioPickerOpen}
+        scenarios={scenarios}
+        onOpenChange={setScenarioPickerOpen}
+        onSelect={(scenario) => {
+          void startScenarioSession(scenario);
+        }}
+      />
+
       <aside className="sidebar">
         <div className="sidebar-top">
           <div className="brand">
@@ -470,7 +575,7 @@ export default function App() {
             </div>
           </div>
 
-          <button className="new-thread-button" onClick={createSession}>
+          <button className="new-thread-button" onClick={openScenarioPicker}>
             <Plus size={16} />
             <span>新会话</span>
           </button>
@@ -486,6 +591,11 @@ export default function App() {
                   onClick={() => void hydrateSession(session.session_id)}
                 >
                   <div className="session-card-title">{session.title}</div>
+                  {session.scenario_label ? (
+                    <div className="session-card-badges">
+                      <span className="session-badge">{session.scenario_label}</span>
+                    </div>
+                  ) : null}
                   <div className="session-card-meta">
                     <span>{session.message_count} 条消息</span>
                     <span>{formatTimestamp(session.updated_at)}</span>
@@ -510,6 +620,7 @@ export default function App() {
         <header className="workspace-header">
           <div className="workspace-heading">
             <h1>{currentTitle}</h1>
+            {sessionPayload.scenario_label ? <p>{sessionPayload.scenario_label}</p> : null}
           </div>
         </header>
 
@@ -524,10 +635,16 @@ export default function App() {
                   {llmStatus.model}
                 </span>
               ) : null}
-              {health?.dataset ? (
+              {sessionPayload.scenario_label ? (
+                <span className="context-badge">
+                  <GitBranch size={13} />
+                  {sessionPayload.scenario_label}
+                </span>
+              ) : null}
+              {sessionPayload.dataset_name ? (
                 <span className="context-badge">
                   <Database size={13} />
-                  {health.dataset}
+                  {sessionPayload.dataset_name}
                 </span>
               ) : null}
               <span className="context-badge">

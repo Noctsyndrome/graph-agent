@@ -19,6 +19,9 @@ def test_session_store_roundtrip() -> None:
     clear_sessions()
     upsert_session(
         "session-1",
+        scenario_id="hvac",
+        scenario_label="HVAC 冷水机组",
+        dataset_name="kgqa_poc",
         messages=[{"id": "u1", "role": "user", "content": "测试问题"}],
         state={"latestResult": {"renderer": "raw_json"}},
         status="completed",
@@ -26,13 +29,22 @@ def test_session_store_roundtrip() -> None:
     payload = get_session_payload("session-1")
     assert payload is not None
     assert payload.session_id == "session-1"
+    assert payload.scenario_id == "hvac"
     assert payload.messages[0]["content"] == "测试问题"
     assert payload.state["latestResult"]["renderer"] == "raw_json"
 
 
+def test_scenarios_endpoint_returns_hvac_and_elevator() -> None:
+    client = TestClient(app)
+    response = client.get("/scenarios")
+    assert response.status_code == 200
+    payload = response.json()
+    assert {item["id"] for item in payload} == {"elevator", "hvac"}
+
+
 def test_chat_stream_endpoint_returns_sse(monkeypatch) -> None:
     clear_sessions()
-    monkeypatch.setattr("kgqa.api.get_kgqa_agent", lambda settings: _FakeAgent())
+    monkeypatch.setattr("kgqa.api.get_kgqa_agent", lambda settings, scenario=None: _FakeAgent())
     client = TestClient(app)
 
     with client.stream(
@@ -40,6 +52,7 @@ def test_chat_stream_endpoint_returns_sse(monkeypatch) -> None:
         "/chat",
         json={
             "threadId": "fake-thread",
+            "scenarioId": "elevator",
             "messages": [{"id": "u1", "role": "user", "content": "你好"}],
             "state": {},
         },
@@ -49,3 +62,27 @@ def test_chat_stream_endpoint_returns_sse(monkeypatch) -> None:
     assert response.status_code == 200
     assert any("RUN_STARTED" in chunk for chunk in chunks)
     assert any("TEXT_MESSAGE_CONTENT" in chunk for chunk in chunks)
+
+
+def test_chat_stream_rejects_switching_scenario() -> None:
+    clear_sessions()
+    upsert_session(
+        "locked-session",
+        scenario_id="elevator",
+        scenario_label="建筑行业 · 电梯设备",
+        dataset_name="elevator_poc",
+        messages=[{"id": "u1", "role": "user", "content": "之前的问题"}],
+        state={},
+        status="completed",
+    )
+    client = TestClient(app)
+    response = client.post(
+        "/chat",
+        json={
+            "threadId": "locked-session",
+            "scenarioId": "hvac",
+            "messages": [{"id": "u2", "role": "user", "content": "继续"}],
+            "state": {},
+        },
+    )
+    assert response.status_code == 409

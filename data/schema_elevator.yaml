@@ -1,0 +1,120 @@
+dataset: elevator_poc
+description: 电梯设备知识图谱问答演示数据集
+entities:
+  - name: Customer
+    description: 客户信息
+    properties:
+      id: string
+      name: string
+      industry: string
+      region: string
+      level: string
+      dataset: string
+    filterable_fields: [name, industry, region, level]
+  - name: Project
+    description: 项目信息
+    properties:
+      id: string
+      name: string
+      type: string
+      city: string
+      start_date: date
+      status: string
+      area_sqm: number
+      dataset: string
+    filterable_fields: [name, type, city, start_date, status]
+  - name: Category
+    description: 电梯类型
+    properties:
+      id: string
+      name: string
+      system: string
+      parent_id: string
+      level: number
+      dataset: string
+    filterable_fields: [name, system, parent_id, level]
+  - name: Model
+    description: 电梯型号
+    properties:
+      id: string
+      name: string
+      brand: string
+      load_kg: number
+      speed_ms: number
+      drive_type: string
+      noise_db: number
+      floors: number
+      price_wan: number
+      dataset: string
+    filterable_fields: [name, brand, load_kg, speed_ms, drive_type, price_wan]
+  - name: Installation
+    description: 电梯安装记录
+    properties:
+      id: string
+      model_id: string
+      project_id: string
+      quantity: number
+      install_date: date
+      status: string
+      dataset: string
+    filterable_fields: [model_id, project_id, quantity, install_date, status]
+relationships:
+  - name: OWNS_PROJECT
+    from: Customer
+    to: Project
+    cardinality: 1:N
+    direction: out
+  - name: HAS_INSTALLATION
+    from: Project
+    to: Installation
+    cardinality: 1:N
+    direction: out
+  - name: USES_MODEL
+    from: Installation
+    to: Model
+    cardinality: N:1
+    direction: out
+  - name: BELONGS_TO
+    from: Model
+    to: Category
+    cardinality: N:1
+    direction: out
+  - name: PARENT_OF
+    from: Category
+    to: Category
+    cardinality: 1:N
+    direction: out
+  - name: CAN_REPLACE
+    from: Model
+    to: Model
+    cardinality: N:N
+    direction: out
+paths:
+  SINGLE_DOMAIN:
+    - Category -> Model
+    - Model -> attributes
+  CROSS_DOMAIN:
+    - Customer -> Project -> Installation -> Model
+    - Project -> Installation -> Model
+  AGGREGATION:
+    - Model -> Installation -> Project -> Customer
+    - Project -> Installation -> Model
+  MULTI_STEP:
+    - Project[filter] -> Installation -> Model[filter]
+    - Customer -> Project[type] -> Installation -> Model -> CAN_REPLACE
+column_aliases:
+  项目:
+    zh: [项目名称]
+    en: [project, project_name]
+  型号:
+    zh: [电梯型号, 设备名称, 机型, 可替代型号, 替代型号]
+    en: [name, model, model_name]
+  品牌:
+    zh: [品牌名称]
+    en: [brand]
+  速度:
+    zh: [额定速度]
+    en: [speed_ms]
+  载重:
+    zh: [额定载重]
+    en: [load_kg]

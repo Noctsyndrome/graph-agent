@@ -11,15 +11,16 @@ from kgqa.config import Settings
 from kgqa.llm import LLMClient
 from kgqa.models import ChatRequest
 from kgqa.query import DomainRegistry
+from kgqa.scenario import ScenarioDefinition, build_scenario_settings, get_scenario_definition
 from kgqa.schema import SchemaRegistry
 from kgqa.session import upsert_session
 from kgqa.tools import KGQAToolbox
 
-_AGENT_CACHE: dict[tuple[str, str, str, str, str, str, str], "KGQAAgent"] = {}
+_AGENT_CACHE: dict[tuple[str, str, str, str, str, str, str, str], "KGQAAgent"] = {}
 _AGENT_CACHE_LOCK = Lock()
 
 
-def _agent_cache_key(settings: Settings) -> tuple[str, str, str, str, str, str, str]:
+def _agent_cache_key(settings: Settings, scenario: ScenarioDefinition) -> tuple[str, str, str, str, str, str, str, str]:
     return (
         settings.neo4j_uri,
         settings.neo4j_username,
@@ -27,19 +28,22 @@ def _agent_cache_key(settings: Settings) -> tuple[str, str, str, str, str, str, 
         settings.llm_base_url,
         settings.llm_api_key,
         settings.llm_model,
-        settings.dataset_name,
+        scenario.dataset_name,
+        str(scenario.schema_file),
     )
 
 
-def get_kgqa_agent(settings: Settings) -> "KGQAAgent":
-    key = _agent_cache_key(settings)
+def get_kgqa_agent(settings: Settings, scenario: ScenarioDefinition | None = None) -> "KGQAAgent":
+    resolved_scenario = scenario or get_scenario_definition()
+    scenario_settings = build_scenario_settings(settings, resolved_scenario)
+    key = _agent_cache_key(scenario_settings, resolved_scenario)
     agent = _AGENT_CACHE.get(key)
     if agent is not None:
         return agent
     with _AGENT_CACHE_LOCK:
         agent = _AGENT_CACHE.get(key)
         if agent is None:
-            agent = KGQAAgent(settings)
+            agent = KGQAAgent(scenario_settings, resolved_scenario)
             _AGENT_CACHE[key] = agent
         return agent
 
@@ -49,8 +53,11 @@ def close_all_kgqa_agents() -> None:
 
 
 class KGQAAgent:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, scenario: ScenarioDefinition):
         self.settings = settings
+        self.scenario_id = scenario.scenario_id
+        self.scenario_label = scenario.label
+        self.dataset_name = scenario.dataset_name
         self.llm_client = LLMClient(settings)
         self.domain = DomainRegistry(settings)
         self.domain.load()
@@ -63,12 +70,29 @@ class KGQAAgent:
         messages = deepcopy(request.messages)
         state = deepcopy(request.state)
         state.setdefault("toolHistory", [])
-        upsert_session(thread_id, messages=messages, state=self._public_state(state), status="running")
+        session_scenario_id = request.scenarioId or self.scenario_id
+        upsert_session(
+            thread_id,
+            scenario_id=session_scenario_id,
+            scenario_label=self.scenario_label,
+            dataset_name=self.dataset_name,
+            messages=messages,
+            state=self._public_state(state),
+            status="running",
+        )
 
         question = self._extract_latest_user_message(messages)
         if not question:
             yield self._sse({"type": "RUN_ERROR", "message": "No user message found.", "code": "missing_user_message"})
-            upsert_session(thread_id, messages=messages, state=self._public_state(state), status="failed")
+            upsert_session(
+                thread_id,
+                scenario_id=session_scenario_id,
+                scenario_label=self.scenario_label,
+                dataset_name=self.dataset_name,
+                messages=messages,
+                state=self._public_state(state),
+                status="failed",
+            )
             return
 
         yield self._sse(
@@ -121,7 +145,15 @@ class KGQAAgent:
                 )
                 if tool_name == "format_results":
                     formatted_result = tool_result
-                upsert_session(thread_id, messages=messages, state=self._public_state(state), status="running")
+                upsert_session(
+                    thread_id,
+                    scenario_id=session_scenario_id,
+                    scenario_label=self.scenario_label,
+                    dataset_name=self.dataset_name,
+                    messages=messages,
+                    state=self._public_state(state),
+                    status="running",
+                )
                 yield self._sse({"type": "STEP_FINISHED", "stepName": step_name, "timestamp": time.time()})
 
                 if formatted_result and decision.get("auto_finish_after_format", True):
@@ -144,7 +176,15 @@ class KGQAAgent:
             for event in self._text_message_events(assistant_message_id, final_answer):
                 yield self._sse(event)
 
-            upsert_session(thread_id, messages=messages, state=self._public_state(state), status="completed")
+            upsert_session(
+                thread_id,
+                scenario_id=session_scenario_id,
+                scenario_label=self.scenario_label,
+                dataset_name=self.dataset_name,
+                messages=messages,
+                state=self._public_state(state),
+                status="completed",
+            )
             yield self._sse(
                 {
                     "type": "RUN_FINISHED",
@@ -155,7 +195,15 @@ class KGQAAgent:
                 }
             )
         except Exception as exc:
-            upsert_session(thread_id, messages=messages, state=self._public_state(state), status="failed")
+            upsert_session(
+                thread_id,
+                scenario_id=session_scenario_id,
+                scenario_label=self.scenario_label,
+                dataset_name=self.dataset_name,
+                messages=messages,
+                state=self._public_state(state),
+                status="failed",
+            )
             yield self._sse({"type": "RUN_ERROR", "message": str(exc), "code": "agent_failed", "timestamp": time.time()})
 
     def _decide_next_action(

@@ -33,6 +33,7 @@ class SerializedResult(BaseModel):
 class ChatRequest(BaseModel):
     threadId: str | None = None
     runId: str | None = None
+    scenarioId: str | None = None
     messages: list[dict[str, Any]] = Field(default_factory=list)
     state: dict[str, Any] = Field(default_factory=dict)
     tools: list[dict[str, Any]] = Field(default_factory=list)
@@ -52,6 +53,9 @@ class ChatMessageRecord(BaseModel):
 class ChatSessionRecord(BaseModel):
     session_id: str
     title: str
+    scenario_id: str
+    scenario_label: str
+    dataset_name: str
     created_at: float
     updated_at: float
     messages: list[dict[str, Any]] = Field(default_factory=list)
@@ -62,6 +66,9 @@ class ChatSessionRecord(BaseModel):
 class ChatSessionSummary(BaseModel):
     session_id: str
     title: str
+    scenario_id: str
+    scenario_label: str
+    dataset_name: str
     created_at: float
     updated_at: float
     message_count: int
@@ -71,6 +78,9 @@ class ChatSessionSummary(BaseModel):
 class ChatSessionPayload(BaseModel):
     session_id: str
     title: str
+    scenario_id: str
+    scenario_label: str
+    dataset_name: str
     created_at: float
     updated_at: float
     messages: list[dict[str, Any]] = Field(default_factory=list)

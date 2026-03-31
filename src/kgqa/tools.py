@@ -36,7 +36,7 @@ class KGQAToolbox:
             },
             {
                 "name": "list_domain_values",
-                "description": "读取图谱中的真实枚举值，例如 customers/brands/cities/project_types/project_statuses/categories/refrigerants。",
+                "description": "读取图谱中各实体 filterable_fields 的真实枚举值。kind 可选，格式为 Entity.field。",
                 "args_schema": {"kind": "string | null"},
             },
             {
@@ -71,22 +71,9 @@ class KGQAToolbox:
         }
 
     def list_domain_values(self, kind: str | None = None) -> dict[str, Any]:
-        payload = {
-            "customers": self.domain.customers,
-            "brands": self.domain.brands,
-            "cities": self.domain.cities,
-            "project_types": self.domain.project_types,
-            "project_statuses": self.domain.project_statuses,
-            "categories": self.domain.categories,
-            "refrigerants": self.domain.refrigerants,
-        }
         if not kind:
-            return payload
-        normalized = str(kind).strip().lower()
-        for key, value in payload.items():
-            if key.lower() == normalized:
-                return {key: value}
-        raise ValueError(f"Unknown domain value kind: {kind}")
+            return self.domain.as_dict()
+        return self.domain.get_filtered(str(kind))
 
     def validate_cypher(self, cypher: str) -> dict[str, Any]:
         try:

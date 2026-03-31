@@ -14,13 +14,12 @@ class _DummyLLMClient:
 def _build_toolbox() -> KGQAToolbox:
     settings = get_settings()
     domain = DomainRegistry(settings)
-    domain._customers = ["万科", "华润"]
-    domain._brands = ["开利", "大金"]
-    domain._cities = ["深圳", "上海"]
-    domain._project_types = ["商业", "住宅"]
-    domain._project_statuses = ["建设中", "运营中"]
-    domain._categories = ["冷水机组"]
-    domain._refrigerants = ["R-22", "R-410A"]
+    domain._values = {
+        "Customer": {"name": ["万科", "华润"]},
+        "Project": {"city": ["深圳", "上海"], "type": ["商业", "住宅"], "status": ["建设中", "运营中"]},
+        "Category": {"name": ["冷水机组"]},
+        "Model": {"brand": ["开利", "大金"], "refrigerant": ["R-22", "R-410A"]},
+    }
     schema = SchemaRegistry(settings, domain=domain)
     return KGQAToolbox(settings, schema, domain, _DummyLLMClient())  # type: ignore[arg-type]
 
@@ -28,7 +27,7 @@ def _build_toolbox() -> KGQAToolbox:
 def test_list_domain_values_returns_expected_kind() -> None:
     toolbox = _build_toolbox()
     payload = toolbox.list_domain_values("project_statuses")
-    assert payload == {"project_statuses": ["建设中", "运营中"]}
+    assert payload == {"Project": {"status": ["建设中", "运营中"]}}
 
 
 def test_format_results_returns_table_renderer_for_preview_rows() -> None:

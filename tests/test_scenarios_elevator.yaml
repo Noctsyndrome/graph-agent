@@ -1,0 +1,149 @@
+baseline:
+  - id: E-S1-1
+    question: 乘客电梯有哪些型号？
+    must_include: [型号, 品牌]
+  - id: E-S1-2
+    question: 额定速度在 3m/s 以上的电梯有哪些？
+    must_include: [型号, 速度]
+  - id: E-S1-3
+    question: 奥的斯 GeN2-MR 的详细参数是什么？
+    must_include: [GeN2-MR, 奥的斯]
+  - id: E-S1-4
+    question: 奥的斯和三菱的乘客电梯有什么区别？
+    must_include: [奥的斯, 三菱]
+  - id: E-S2-1
+    question: 绿城的项目分别用了哪些品牌的电梯？
+    must_include: [绿城, 项目]
+  - id: E-S2-2
+    question: 哪些项目安装了通力的电梯？
+    must_include: [项目]
+  - id: E-S2-3
+    question: 武汉的项目都用了什么电梯？
+    must_include: [武汉, 项目]
+  - id: E-S3-1
+    question: 哪个客户使用奥的斯电梯最多？
+    must_include: [客户]
+  - id: E-S3-2
+    question: 各品牌电梯在所有项目中的占比是多少？
+    must_include: [品牌, 占比]
+  - id: E-S3-3
+    question: 哪个城市的项目电梯安装总量最大？
+    must_include: [城市]
+  - id: E-S4-1
+    question: 2024年后的项目中有没有还在用液压驱动电梯的？
+    must_include: [项目]
+  - id: E-S4-2
+    question: 绿城的医院项目中载重最大的电梯是哪台？有没有可替代方案？
+    must_include: [型号, 品牌]
+  - id: E-S4-3
+    question: 对比武汉和北京的项目，哪边的电梯平均速度更高？
+    must_include: [武汉, 北京]
+
+challenge:
+  - id: E-C1
+    question: 帮我列一下乘客电梯的设备型号
+    must_include: [型号, 品牌]
+  - id: E-C2
+    question: 速度超过 3 的电梯有哪些？
+    must_include: [型号]
+  - id: E-C3
+    question: GeN2-MR 参数给我看下
+    must_include: [GeN2-MR]
+  - id: E-C4
+    question: 对比下奥的斯和三菱的电梯差异
+    must_include: [奥的斯, 三菱]
+  - id: E-C5
+    question: 绿城名下各项目都在用哪些电梯品牌？
+    must_include: [绿城, 项目]
+  - id: E-C6
+    question: 通力电梯都落在哪些项目上？
+    must_include: [项目]
+  - id: E-C7
+    question: 武汉项目装了哪些电梯型号？
+    must_include: [项目]
+  - id: E-C8
+    question: 奥的斯电梯用量最多的是哪个客户？
+    must_include: [客户]
+  - id: E-C9
+    question: 全部项目里，各品牌电梯分别占多少比例？
+    must_include: [品牌, 占比]
+  - id: E-C10
+    question: 哪座城市的项目电梯总量排第一？
+    must_include: [城市]
+  - id: E-C11
+    question: 2024 年以后还有项目在用液压驱动吗？
+    must_include: [项目]
+  - id: E-C12
+    question: 绿城医院项目里载重最大的电梯是什么，有替代型号吗？
+    must_include: [型号, 品牌]
+  - id: E-C13
+    question: 武汉和北京的项目相比，哪边平均速度更高？
+    must_include: [武汉, 北京]
+  - id: E-C14
+    question: 武汉的项目使用了哪些品牌？
+    must_include: [项目]
+  - id: E-C15
+    question: 哪个客户的奥的斯电梯数量最多？
+    must_include: [客户]
+  - id: E-C16
+    question: 绿城医院项目里载重最大的那台电梯是什么？
+    must_include: [型号]
+  - id: E-C17
+    question: 有没有品牌 XYZ 的电梯？
+    allow_empty: true
+  - id: E-C18
+    question: 火星区域的项目用了什么电梯？
+    allow_empty: true
+  - id: E-C19
+    question: 给我按项目看武汉当前都在用什么品牌和型号
+    must_include: [项目]
+  - id: E-C20
+    question: 电梯里奥的斯和三菱谁的平均速度更高？
+    must_include: [奥的斯, 三菱]
+
+generalization:
+  - id: E-G1
+    question: 噪音低于 50 分贝的电梯有哪些？
+    must_include: [型号, 噪音]
+  - id: E-G2
+    question: 价格在 100 万以上的电梯型号有哪些？
+    must_include: [型号, 价格]
+  - id: E-G3
+    question: 日立有几个型号的乘客电梯？
+    must_include: [日立]
+  - id: E-G4
+    question: 使用永磁同步驱动的电梯有哪些？
+    must_include: [型号]
+  - id: E-G5
+    question: 服务层站数最多的电梯是哪个型号？
+    must_include: [型号]
+  - id: E-G6
+    question: 哪些项目同时安装了奥的斯和三菱的电梯？
+    must_include: [项目]
+  - id: E-G7
+    question: 中海的项目分布在哪些城市？
+    must_include: [中海, 城市]
+  - id: E-G8
+    question: 安装数量超过 5 台的项目有哪些？
+    must_include: [项目]
+  - id: E-G9
+    question: 哪些客户的项目用了迅达的电梯？
+    must_include: [客户]
+  - id: E-G10
+    question: 天津有哪些客户有项目？
+    must_include: [客户]
+  - id: E-G11
+    question: 每个品牌的平均额定速度是多少？
+    must_include: [品牌, 平均]
+  - id: E-G12
+    question: 哪个客户的项目数量最多？
+    must_include: [客户]
+  - id: E-G13
+    question: 建设中的项目有多少个？
+    must_include: [项目]
+  - id: E-G14
+    question: 绿城和中海相比，谁的项目总面积更大？
+    must_include: [绿城, 中海]
+  - id: E-G15
+    question: 最近开工的 5 个项目是哪些？
+    must_include: [项目]
