@@ -52,6 +52,54 @@ class QueryRequest(BaseModel):
     question: str
 
 
+class ChatRequest(BaseModel):
+    threadId: str | None = None
+    runId: str | None = None
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    state: dict[str, Any] = Field(default_factory=dict)
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    context: list[dict[str, Any]] = Field(default_factory=list)
+    forwardedProps: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatMessageRecord(BaseModel):
+    id: str
+    role: str
+    content: Any = ""
+    toolCalls: list[dict[str, Any]] = Field(default_factory=list)
+    toolCallId: str | None = None
+    created_at: float
+
+
+class ChatSessionRecord(BaseModel):
+    session_id: str
+    title: str
+    created_at: float
+    updated_at: float
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    state: dict[str, Any] = Field(default_factory=dict)
+    status: str = "idle"
+
+
+class ChatSessionSummary(BaseModel):
+    session_id: str
+    title: str
+    created_at: float
+    updated_at: float
+    message_count: int
+    status: str
+
+
+class ChatSessionPayload(BaseModel):
+    session_id: str
+    title: str
+    created_at: float
+    updated_at: float
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    state: dict[str, Any] = Field(default_factory=dict)
+    status: str
+
+
 class LLMResponse(BaseModel):
     content: str
     raw: dict[str, Any] = Field(default_factory=dict)

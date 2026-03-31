@@ -4,12 +4,17 @@ import threading
 import time
 import uuid
 
+import yaml
 from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
+from kgqa.agent import close_all_kgqa_agents, get_kgqa_agent
 from kgqa.config import get_settings
 from kgqa.llm import LLMClient, close_all_llm_clients
-from kgqa.models import QueryRequest, QueryResponse
+from kgqa.models import ChatRequest, QueryRequest, QueryResponse
 from kgqa.query import Neo4jExecutor, close_all_neo4j_drivers
+from kgqa.session import clear_sessions, get_session_payload, list_sessions
 from kgqa.service import close_all_kgqa_services, get_kgqa_service
 
 settings = get_settings()
@@ -20,6 +25,14 @@ _LLM_STATUS_CACHE: dict[str, object] = {
     "checked_at": 0.0,
     "payload": None,
 }
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[settings.frontend_app_url, "http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _set_query_job(job_id: str, **fields: object) -> None:
@@ -110,10 +123,13 @@ def startup_event() -> None:
     executor = Neo4jExecutor(settings)
     executor.warmup()
     get_kgqa_service(settings)
+    get_kgqa_agent(settings)
 
 
 @app.on_event("shutdown")
 def shutdown_event() -> None:
+    clear_sessions()
+    close_all_kgqa_agents()
     close_all_kgqa_services()
     close_all_llm_clients()
     close_all_neo4j_drivers()
@@ -138,6 +154,12 @@ def llm_status(force: bool = False) -> dict[str, object]:
 def schema_summary() -> dict[str, object]:
     service = get_kgqa_service(settings)
     return service.schema.summary()
+
+
+@app.get("/examples")
+def examples() -> dict[str, object]:
+    scenarios = yaml.safe_load(settings.evaluation_file.read_text(encoding="utf-8")) or {}
+    return scenarios
 
 
 @app.post("/query", response_model=QueryResponse)
@@ -185,6 +207,38 @@ def seed_load() -> dict[str, str]:
     _LLM_STATUS_CACHE["checked_at"] = 0.0
     _LLM_STATUS_CACHE["payload"] = None
     return {"status": "loaded"}
+
+
+@app.get("/chat/sessions")
+def chat_sessions() -> list[dict[str, object]]:
+    return [item.model_dump() for item in list_sessions()]
+
+
+@app.get("/chat/{session_id}/messages")
+def chat_session_messages(session_id: str) -> dict[str, object]:
+    payload = get_session_payload(session_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+    return payload.model_dump()
+
+
+@app.post("/chat")
+def chat(request: ChatRequest) -> StreamingResponse:
+    agent = get_kgqa_agent(settings)
+
+    def event_stream() -> object:
+        for event in agent.stream_chat(request):
+            yield event
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def main() -> None:
