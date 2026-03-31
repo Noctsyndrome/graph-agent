@@ -1,21 +1,14 @@
 from __future__ import annotations
 
 import datetime as dt
-import re
 from typing import Any
 
 from neo4j import Driver, GraphDatabase
 
 from kgqa.config import Settings
-from kgqa.llm import LLMClient
-from kgqa.models import IntentResult
+import re
 
 _DRIVER_CACHE: dict[tuple[str, str, str], Driver] = {}
-
-
-def normalize_key(text: str) -> str:
-    sanitized = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", text.strip())
-    return sanitized.strip("_") or "value"
 
 
 def get_neo4j_driver(settings: Settings) -> Driver:
@@ -34,6 +27,12 @@ def close_all_neo4j_drivers() -> None:
     for driver in _DRIVER_CACHE.values():
         driver.close()
     _DRIVER_CACHE.clear()
+
+
+def load_seed_data(settings: Settings) -> None:
+    script = settings.seed_file.read_text(encoding="utf-8")
+    executor = Neo4jExecutor(settings)
+    executor.load_seed_data(script)
 
 
 class Neo4jExecutor:
@@ -191,82 +190,4 @@ class DomainRegistry:
             suffix = " ..." if len(values) > 10 else ""
             lines.append(f"- {label}: {preview}{suffix}")
         return "\n".join(lines)
-
-
-class CypherGenerator:
-    def __init__(self, settings: Settings, llm_client: LLMClient, domain: DomainRegistry | None = None):
-        self.settings = settings
-        self.llm_client = llm_client
-        self.domain = domain or DomainRegistry(settings)
-
-    def generate_with_llm(
-        self,
-        question: str,
-        intent_result: IntentResult,
-        schema_context: str,
-        few_shots: list[dict[str, str]],
-        retry: bool = False,
-    ) -> str:
-        examples = "\n\n".join(
-            f"问题: {item['question']}\nCypher:\n{item['cypher']}" for item in few_shots
-        )
-        retry_instruction = (
-            "\n上一次输出未通过校验。请只输出一条可执行、只读、无 Markdown 包裹的 Cypher。"
-            "\n如果涉及时间范围、年份前后、数值比较，必须使用 WHERE 条件，"
-            "例如 p.start_date >= date('2024-01-01')，不要写成 {start_date: '>2023'} 这种属性字符串。"
-            if retry
-            else ""
-        )
-        domain_summary = self.domain.prompt_summary()
-        prompt = (
-            f"{schema_context}\n\n"
-            f"{domain_summary}\n\n"
-            f"## few-shot 示例\n{examples}\n\n"
-            f"问题：{question}\n"
-            f"意图：{intent_result.intent.value}\n"
-            f"实体：{intent_result.entities}\n"
-            f"过滤条件：{intent_result.filters}\n"
-            f"聚合需求：{intent_result.needs_aggregation}\n"
-            f"多步需求：{intent_result.needs_multi_step}\n"
-            "请生成单条只读 Cypher，只返回 Cypher 本身。"
-            " 如果问题里出现口语化类别、地区或项目状态表达，请优先使用上面枚举摘要中的真实值，不要自造接近但不存在的字面量。"
-            f"{retry_instruction}"
-        )
-        system_prompt = (
-            "你是 NL2Cypher 生成器，只能生成单条只读 Cypher。"
-            " 涉及日期范围、年份前后、大小比较、时间过滤时，必须使用 WHERE 条件，"
-            "例如 p.start_date >= date('2024-01-01')。"
-            " 不要把 >2023、<2024、>=6 这类比较表达式写进节点属性 map。"
-        )
-        if "替代" in question:
-            system_prompt += (
-                " 对于“X有哪些可替代方案”这类问题，必须从源型号出发使用"
-                " (src:Model {name: 'X'})-[:CAN_REPLACE]->(replacement:Model) 的方向，"
-                "不要反向写成 replacement 指向源型号。"
-            )
-        response = self.llm_client.generate(
-            prompt=prompt,
-            system_prompt=system_prompt,
-        )
-        text = LLMClient.strip_code_fence(response.content).strip()
-        text = re.sub(r"^cypher\s*", "", text, flags=re.IGNORECASE).strip()
-        return (
-            text.replace("，", ",")
-            .replace("（", "(")
-            .replace("）", ")")
-            .replace("；", ";")
-            .replace("：", ":")
-        )
-
-    @staticmethod
-    def should_treat_empty_as_failure(question: str) -> bool:
-        text = question.replace(" ", "")
-        no_result_text = text.replace("有没有", "")
-        if any(keyword in no_result_text for keyword in ["不存在", "没有", "未找到", "空结果", "火星", "XYZ"]):
-            return False
-        if any(keyword in text for keyword in ["有哪些可替代方案", "可替代方案有哪些", "可替代的设备"]):
-            return True
-        if "替代" in text:
-            return False
-        return True
 

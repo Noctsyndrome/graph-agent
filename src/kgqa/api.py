@@ -1,26 +1,22 @@
 from __future__ import annotations
 
-import threading
 import time
-import uuid
 
 import yaml
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from kgqa.agent import close_all_kgqa_agents, get_kgqa_agent
 from kgqa.config import get_settings
 from kgqa.llm import LLMClient, close_all_llm_clients
-from kgqa.models import ChatRequest, QueryRequest, QueryResponse
-from kgqa.query import Neo4jExecutor, close_all_neo4j_drivers
+from kgqa.models import ChatRequest
+from kgqa.query import Neo4jExecutor, close_all_neo4j_drivers, load_seed_data
+from kgqa.schema import SchemaRegistry
 from kgqa.session import clear_sessions, get_session_payload, list_sessions
-from kgqa.service import close_all_kgqa_services, get_kgqa_service
 
 settings = get_settings()
 app = FastAPI(title="kg-qa-poc", version="0.1.0")
-_QUERY_JOB_STORE: dict[str, dict[str, object]] = {}
-_QUERY_JOB_LOCK = threading.Lock()
 _LLM_STATUS_CACHE: dict[str, object] = {
     "checked_at": 0.0,
     "payload": None,
@@ -33,41 +29,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-def _set_query_job(job_id: str, **fields: object) -> None:
-    with _QUERY_JOB_LOCK:
-        current = _QUERY_JOB_STORE.get(job_id, {})
-        current.update(fields)
-        _QUERY_JOB_STORE[job_id] = current
-
-
-def _run_query_job(job_id: str, question: str) -> None:
-    service = get_kgqa_service(settings)
-    _set_query_job(job_id, status="running", stage="queued", message="请求已提交，等待执行")
-
-    def progress_callback(stage: str, message: str) -> None:
-        _set_query_job(job_id, status="running", stage=stage, message=message, updated_at=time.time())
-
-    try:
-        response = service.process_question(question, progress_callback=progress_callback)
-        _set_query_job(
-            job_id,
-            status="completed",
-            stage="completed",
-            message="知识图谱问答链路执行完成",
-            response=response.model_dump(),
-            updated_at=time.time(),
-        )
-    except Exception as exc:
-        _set_query_job(
-            job_id,
-            status="failed",
-            stage="failed",
-            message=str(exc),
-            error=str(exc),
-            updated_at=time.time(),
-        )
 
 
 def _get_llm_status_payload(force: bool = False) -> dict[str, object]:
@@ -122,7 +83,6 @@ def _get_llm_status_payload(force: bool = False) -> dict[str, object]:
 def startup_event() -> None:
     executor = Neo4jExecutor(settings)
     executor.warmup()
-    get_kgqa_service(settings)
     get_kgqa_agent(settings)
 
 
@@ -130,7 +90,6 @@ def startup_event() -> None:
 def shutdown_event() -> None:
     clear_sessions()
     close_all_kgqa_agents()
-    close_all_kgqa_services()
     close_all_llm_clients()
     close_all_neo4j_drivers()
 
@@ -152,8 +111,7 @@ def llm_status(force: bool = False) -> dict[str, object]:
 
 @app.get("/schema")
 def schema_summary() -> dict[str, object]:
-    service = get_kgqa_service(settings)
-    return service.schema.summary()
+    return SchemaRegistry(settings, domain=get_kgqa_agent(settings).domain).summary()
 
 
 @app.get("/examples")
@@ -162,48 +120,14 @@ def examples() -> dict[str, object]:
     return scenarios
 
 
-@app.post("/query", response_model=QueryResponse)
-def query(request: QueryRequest) -> QueryResponse:
-    service = get_kgqa_service(settings)
-    try:
-        return service.process_question(request.question)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/query/jobs")
-def submit_query_job(request: QueryRequest, background_tasks: BackgroundTasks) -> dict[str, object]:
-    job_id = str(uuid.uuid4())
-    created_at = time.time()
-    _set_query_job(
-        job_id,
-        status="queued",
-        stage="queued",
-        message="请求已提交，等待执行",
-        question=request.question,
-        created_at=created_at,
-        updated_at=created_at,
-    )
-    background_tasks.add_task(_run_query_job, job_id, request.question)
-    return {"request_id": job_id, "status": "queued"}
-
-
-@app.get("/query/jobs/{job_id}")
-def get_query_job(job_id: str) -> dict[str, object]:
-    with _QUERY_JOB_LOCK:
-        payload = _QUERY_JOB_STORE.get(job_id)
-    if payload is None:
-        raise HTTPException(status_code=404, detail="Query job not found.")
-    return dict(payload)
-
-
 @app.post("/seed/load")
 def seed_load() -> dict[str, str]:
-    service = get_kgqa_service(settings)
     try:
-        service.load_seed_data()
+        load_seed_data(settings)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    clear_sessions()
+    close_all_kgqa_agents()
     _LLM_STATUS_CACHE["checked_at"] = 0.0
     _LLM_STATUS_CACHE["payload"] = None
     return {"status": "loaded"}

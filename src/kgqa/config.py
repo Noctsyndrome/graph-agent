@@ -26,7 +26,6 @@ class Settings(BaseSettings):
     neo4j_validate_with_explain: bool = Field(default=False, alias="NEO4J_VALIDATE_WITH_EXPLAIN")
     dataset_name: str = "kgqa_poc"
     schema_file: Path = ROOT / "data" / "schema.yaml"
-    few_shots_file: Path = ROOT / "data" / "few_shots.yaml"
     seed_file: Path = ROOT / "data" / "seed_data.cypher"
     evaluation_file: Path = ROOT / "tests" / "test_scenarios.yaml"
     report_file: Path = ROOT / "eval" / "report.html"

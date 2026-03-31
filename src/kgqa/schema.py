@@ -6,7 +6,6 @@ from typing import Any, TYPE_CHECKING
 import yaml
 
 from kgqa.config import Settings
-from kgqa.models import IntentType
 
 if TYPE_CHECKING:
     from kgqa.query import DomainRegistry
@@ -16,10 +15,8 @@ class SchemaRegistry:
     def __init__(self, settings: Settings, domain: DomainRegistry | None = None):
         self.settings = settings
         self._schema = self._load_yaml(settings.schema_file)
-        self._few_shots = self._load_yaml(settings.few_shots_file)
         self._domain = domain
         self._focus_keywords = self._build_focus_keywords()
-        self._scoring_keywords = self._build_scoring_keywords()
 
     @staticmethod
     def _load_yaml(path: Path) -> dict[str, Any]:
@@ -29,10 +26,6 @@ class SchemaRegistry:
     def schema(self) -> dict[str, Any]:
         return self._schema
 
-    @property
-    def few_shots(self) -> dict[str, Any]:
-        return self._few_shots
-
     # ------------------------------------------------------------------
     # Schema context rendering
     # ------------------------------------------------------------------
@@ -40,7 +33,6 @@ class SchemaRegistry:
     def render_schema_context(
         self,
         question: str,
-        intent: IntentType | None = None,
         entities: list[str] | None = None,
         filters: dict[str, Any] | None = None,
     ) -> str:
@@ -59,37 +51,18 @@ class SchemaRegistry:
             if focus and relation["from"] not in focus and relation["to"] not in focus:
                 continue
             lines.append(f"- ({relation['from']})-[:{relation['name']}]->({relation['to']})")
-        if intent:
+        paths = self._schema.get("paths", {})
+        if paths:
             lines.append("")
-            lines.append(f"## 典型路径（{intent.value}）")
-            for path in self._schema["paths"].get(intent.value, []):
-                lines.append(f"- {path}")
+            lines.append("## 典型路径")
+            for path_group in paths.values():
+                for path in path_group:
+                    lines.append(f"- {path}")
         if entities or filters:
             lines.append("")
             lines.append(f"## 问题中识别到的实体：{entities}")
             lines.append(f"## 问题中识别到的过滤条件：{filters}")
         return "\n".join(lines)
-
-    # ------------------------------------------------------------------
-    # Few-shot selection with auto-derived scoring
-    # ------------------------------------------------------------------
-
-    def few_shots_for_intent(self, intent: IntentType, question: str | None = None) -> list[dict[str, str]]:
-        cases = self._few_shots.get(intent.value, [])
-        if not question:
-            return cases
-        text = question.replace(" ", "")
-        scored: list[tuple[int, dict[str, str]]] = []
-        for item in cases:
-            score = 0
-            sample = item["question"].replace(" ", "")
-            for keyword, weight in self._scoring_keywords.items():
-                if keyword in text and keyword in sample:
-                    score += weight
-            scored.append((score, item))
-        scored.sort(key=lambda pair: pair[0], reverse=True)
-        top = [item for _, item in scored[:4]]
-        return top or cases[:4]
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -151,56 +124,3 @@ class SchemaRegistry:
             if entity in {e["name"] for e in self._schema.get("entities", [])}:
                 focus.add(entity)
         return focus
-
-    # ------------------------------------------------------------------
-    # Few-shot scoring keywords – auto-derived from schema
-    # ------------------------------------------------------------------
-
-    def _build_scoring_keywords(self) -> dict[str, int]:
-        """Auto-derive keyword → weight mapping from schema + domain data."""
-        weights: dict[str, int] = {}
-        scoring_config = self._schema.get("few_shot_scoring", {})
-        entity_weight = int(scoring_config.get("entity_description_weight", 1))
-        alias_weight = int(scoring_config.get("column_alias_weight", 2))
-        domain_weight = int(scoring_config.get("domain_value_weight", 3))
-        relationship_weight = int(scoring_config.get("relationship_weight", 2))
-
-        for entity in self._schema.get("entities", []):
-            desc = entity.get("description", "")
-            if desc:
-                clean = desc.replace("信息", "").replace("记录", "")
-                if len(clean) >= 2:
-                    weights[clean] = max(weights.get(clean, 0), entity_weight)
-
-        for rel in self._schema.get("relationships", []):
-            rel_name = rel.get("name", "")
-            if rel_name:
-                humanized = rel_name.replace("_", " ").strip()
-                if humanized:
-                    weights[humanized] = max(weights.get(humanized, 0), relationship_weight)
-
-        for canonical, alias_def in self._schema.get("column_aliases", {}).items():
-            if len(canonical) >= 2:
-                weights[canonical] = max(weights.get(canonical, 0), alias_weight)
-            for alias in alias_def.get("zh", []) + alias_def.get("en", []):
-                if len(alias) >= 2:
-                    weights[alias] = max(weights.get(alias, 0), alias_weight)
-
-        if self._domain:
-            for cat in self._domain.categories:
-                if len(cat) >= 2:
-                    weights[cat] = max(weights.get(cat, 0), domain_weight)
-            for refrigerant in self._domain.refrigerants:
-                if len(refrigerant) >= 2:
-                    weights[refrigerant] = max(weights.get(refrigerant, 0), domain_weight)
-            for project_type in self._domain.project_types:
-                if len(project_type) >= 2:
-                    weights[project_type] = max(weights.get(project_type, 0), alias_weight)
-            for project_status in self._domain.project_statuses:
-                if len(project_status) >= 2:
-                    weights[project_status] = max(weights.get(project_status, 0), alias_weight)
-            for brand in self._domain.brands:
-                if len(brand) >= 2:
-                    weights[brand] = max(weights.get(brand, 0), domain_weight)
-
-        return weights

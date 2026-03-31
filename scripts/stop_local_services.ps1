@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$ports = 8000, 5173, 8501
+$ports = 8000, 5173
 foreach ($port in $ports) {
     $conns = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
     if ($conns) {

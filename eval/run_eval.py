@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import argparse
 import html
-import os
+import json
 import statistics
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from kgqa.agent import get_kgqa_agent
 from kgqa.config import Settings, get_settings
-from kgqa.service import KGQAService, get_kgqa_service
+from kgqa.models import ChatRequest
+from kgqa.schema import SchemaRegistry
+from kgqa.session import clear_sessions, get_session_payload
 
 
 def run_evaluation() -> Path:
@@ -26,7 +31,8 @@ def _run_all(
     settings: Settings,
     scenarios: dict,
 ) -> list[dict[str, object]]:
-    service = get_kgqa_service(settings)
+    clear_sessions()
+    agent = get_kgqa_agent(settings)
     rows: list[dict[str, object]] = []
     all_cases: list[tuple[str, dict]] = []
     for group_name in ("baseline", "challenge", "generalization"):
@@ -35,7 +41,7 @@ def _run_all(
     total = len(all_cases)
     for idx, (group_name, case) in enumerate(all_cases, 1):
         print(f"  ({idx}/{total}) {case['id']}: {case['question'][:40]}...", flush=True)
-        result = run_case(service, group_name, case)
+        result = run_case(agent, settings, group_name, case)
         status = "PASS" if result["generalization_pass"] else "FAIL"
         latency = result["latency_ms"]
         print(f"           → {status}  {latency}ms", flush=True)
@@ -43,36 +49,47 @@ def _run_all(
     return rows
 
 
-def run_case(service: KGQAService, group_name: str, case: dict[str, object]) -> dict[str, object]:
+def run_case(agent, settings: Settings, group_name: str, case: dict[str, object]) -> dict[str, object]:
+    session_id = f"eval-{case['id']}-{uuid.uuid4()}"
     try:
-        response = service.process_question(str(case["question"]))
-        generalization_pass = _matches_expectations(service, response.answer, response.result_preview, case)
+        started = time.perf_counter()
+        stream_events = list(
+            agent.stream_chat(
+                ChatRequest(
+                    threadId=session_id,
+                    messages=[{"id": "u1", "role": "user", "content": str(case["question"])}],
+                    state={},
+                )
+            )
+        )
+        payload = get_session_payload(session_id)
+        if payload is None:
+            raise RuntimeError("Agent session payload not found after chat run.")
+        answer = _latest_assistant_answer(payload.messages)
+        result_preview = _latest_result_preview(payload.state)
+        generalization_pass = _matches_expectations(settings, answer, result_preview, case)
         if case.get("allow_empty"):
-            generalization_pass = "图谱中未找到相关信息" in response.answer
+            generalization_pass = "图谱中未找到相关信息" in answer
 
-        llm_stages: dict[str, str] = {
-            "intent": response.trace.intent.source.value,
-            "plan": response.trace.plan.source.value,
-            "cypher": response.trace.cypher.source.value,
-            "answer": response.trace.answer.source.value,
-        }
-        llm_stage_used = ",".join(name for name, source in llm_stages.items() if source == "llm")
-        query_success = response.trace.query_success
-        answer_quality = "pass" if response.answer and "编造" not in response.answer else "fail"
+        tool_history = list(payload.state.get("toolHistory", [])) if isinstance(payload.state, dict) else []
+        query_success = bool(result_preview) or "图谱中未找到相关信息" in answer
+        answer_quality = "pass" if answer and "编造" not in answer else "fail"
+        run_error = _run_error_message(stream_events)
+        latency_ms = int((time.perf_counter() - started) * 1000)
 
         return {
             "group": group_name,
             "id": case["id"],
             "question": case["question"],
-            "intent": response.intent.value,
-            "strategy": response.strategy,
-            "llm_stage_used": llm_stage_used or "none",
+            "intent": "AGENT",
+            "strategy": "chat_agent",
+            "llm_stage_used": "agent",
             "query_success": query_success,
             "answer_quality": answer_quality,
             "generalization_pass": generalization_pass,
-            "latency_ms": response.latency_ms,
-            "answer": response.answer,
-            "stage_sources": llm_stages,
+            "latency_ms": latency_ms,
+            "answer": answer if not run_error else run_error,
+            "tool_count": len(tool_history),
         }
     except Exception as exc:
         return {
@@ -87,19 +104,46 @@ def run_case(service: KGQAService, group_name: str, case: dict[str, object]) -> 
             "generalization_pass": False,
             "latency_ms": -1,
             "answer": str(exc),
-            "stage_sources": {},
+            "tool_count": 0,
         }
 
 
 def _matches_expectations(
-    service: KGQAService,
+    settings: Settings,
     answer: str,
     preview: list[dict[str, Any]],
     case: dict[str, object],
 ) -> bool:
     text = answer + "\n" + str(preview)
-    alias_lookup = _build_alias_lookup(service.schema.schema.get("column_aliases", {}))
+    schema = SchemaRegistry(settings)
+    alias_lookup = _build_alias_lookup(schema.schema.get("column_aliases", {}))
     return all(_keyword_matches(keyword, text, alias_lookup) for keyword in case.get("must_include", []))
+
+
+def _latest_assistant_answer(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "assistant":
+            return str(message.get("content", "")).strip()
+    return ""
+
+
+def _latest_result_preview(state: dict[str, Any]) -> list[dict[str, Any]]:
+    latest = state.get("latestResult", {})
+    if isinstance(latest, dict):
+        preview = latest.get("preview", latest.get("payload", []))
+        if isinstance(preview, list):
+            return preview
+    return []
+
+
+def _run_error_message(stream_events: list[str]) -> str | None:
+    for raw in stream_events:
+        if not raw.startswith("data: "):
+            continue
+        payload = json.loads(raw[6:])
+        if payload.get("type") == "RUN_ERROR":
+            return str(payload.get("message", "Agent run failed."))
+    return None
 
 
 def _build_alias_lookup(column_aliases: dict[str, dict[str, list[str]]]) -> dict[str, set[str]]:
@@ -147,19 +191,17 @@ def _group_stats(rows: list[dict[str, object]]) -> dict[str, dict[str, object]]:
 
 
 def _stage_stats(rows: list[dict[str, object]]) -> dict[str, dict[str, int]]:
-    """Compute per-stage LLM success rate."""
-    stages = {"intent": {"llm": 0, "other": 0},
-              "plan": {"llm": 0, "other": 0},
-              "cypher": {"llm": 0, "other": 0},
-              "answer": {"llm": 0, "other": 0}}
+    """Compute coarse agent-vs-other stats for the current agent-only runner."""
+    stages = {
+        "agent": {"llm": 0, "other": 0},
+        "tools": {"llm": 0, "other": 0},
+    }
     for row in rows:
-        sources = row.get("stage_sources", {})
-        for stage_name in stages:
-            source = sources.get(stage_name, "none") if sources else "none"
-            if source == "llm":
-                stages[stage_name]["llm"] += 1
-            else:
-                stages[stage_name]["other"] += 1
+        stages["agent"]["llm"] += 1
+        if int(row.get("tool_count", 0)) > 0:
+            stages["tools"]["llm"] += 1
+        else:
+            stages["tools"]["other"] += 1
     return stages
 
 
@@ -222,7 +264,7 @@ def _build_html(rows: list[dict[str, object]]) -> str:
 
     # Stage LLM success table
     stage_rows_html = ""
-    for sname in ("intent", "plan", "cypher", "answer"):
+    for sname in ("agent", "tools"):
         s = stage[sname]
         s_total = s["llm"] + s["other"]
         llm_pct = round(s["llm"] / s_total * 100, 1) if s_total else 0

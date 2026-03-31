@@ -2,7 +2,6 @@
 __pycache__/
 .pytest_cache/
 .mypy_cache/
-.streamlit/
 .claude/
 *.egg-info/
 dist/
