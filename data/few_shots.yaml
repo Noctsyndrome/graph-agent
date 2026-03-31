@@ -43,6 +43,17 @@ CROSS_DOMAIN:
       MATCH (p:Project {dataset: 'kgqa_poc', city: '深圳'})-[:HAS_INSTALLATION]->(i:Installation {dataset: 'kgqa_poc'})-[:USES_MODEL]->(m:Model {dataset: 'kgqa_poc'})
       RETURN p.name AS 项目, collect(DISTINCT m.brand) AS 品牌列表, sum(i.quantity) AS 数量
       ORDER BY p.name
+  - question: 深圳项目装了哪些设备型号？
+    cypher: |
+      MATCH (p:Project {dataset: 'kgqa_poc', city: '深圳'})-[:HAS_INSTALLATION]->(i:Installation {dataset: 'kgqa_poc'})-[:USES_MODEL]->(m:Model {dataset: 'kgqa_poc'})
+      RETURN p.name AS 项目, m.name AS 型号, m.brand AS 品牌, sum(i.quantity) AS 数量
+      ORDER BY p.name, m.name
+  - question: 万科名下各项目都在用哪些冷水机品牌？
+    cypher: |
+      MATCH (:Customer {name: '万科', dataset: 'kgqa_poc'})-[:OWNS_PROJECT]->(p:Project {dataset: 'kgqa_poc'})
+      MATCH (p)-[:HAS_INSTALLATION]->(i:Installation {dataset: 'kgqa_poc'})-[:USES_MODEL]->(m:Model {dataset: 'kgqa_poc'})-[:BELONGS_TO]->(:Category {name: '冷水机组', dataset: 'kgqa_poc'})
+      RETURN p.name AS 项目, collect(DISTINCT m.brand) AS 品牌列表, sum(i.quantity) AS 数量
+      ORDER BY p.name
   - question: 2023年后的项目中，有没有还在用R-22制冷剂设备的？
     cypher: |
       MATCH (p:Project {dataset: 'kgqa_poc'})-[:HAS_INSTALLATION]->(i:Installation {dataset: 'kgqa_poc'})-[:USES_MODEL]->(m:Model {dataset: 'kgqa_poc'})
@@ -64,6 +75,12 @@ AGGREGATION:
       UNWIND rows AS row
       RETURN row.品牌 AS 品牌, row.数量 AS 数量, round(toFloat(row.数量) / total * 100, 2) AS 占比
       ORDER BY 数量 DESC
+  - question: 最近开工的5个项目是哪些？
+    cypher: |
+      MATCH (p:Project {dataset: 'kgqa_poc'})
+      RETURN p.name AS 项目, p.city AS 城市, p.start_date AS 开始日期, p.status AS 项目状态
+      ORDER BY p.start_date DESC
+      LIMIT 5
   - question: 开利设备用量最多的是哪个客户？
     cypher: |
       MATCH (c:Customer {dataset: 'kgqa_poc'})-[:OWNS_PROJECT]->(:Project {dataset: 'kgqa_poc'})-[:HAS_INSTALLATION]->(i:Installation {dataset: 'kgqa_poc'})-[:USES_MODEL]->(m:Model {dataset: 'kgqa_poc'})

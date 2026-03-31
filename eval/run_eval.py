@@ -5,11 +5,12 @@ import html
 import os
 import statistics
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 from kgqa.config import Settings, get_settings
-from kgqa.service import KGQAService
+from kgqa.service import KGQAService, get_kgqa_service
 
 
 def run_evaluation() -> Path:
@@ -25,7 +26,7 @@ def _run_all(
     settings: Settings,
     scenarios: dict,
 ) -> list[dict[str, object]]:
-    service = KGQAService(settings)
+    service = get_kgqa_service(settings)
     rows: list[dict[str, object]] = []
     all_cases: list[tuple[str, dict]] = []
     for group_name in ("baseline", "challenge", "generalization"):
@@ -45,8 +46,7 @@ def _run_all(
 def run_case(service: KGQAService, group_name: str, case: dict[str, object]) -> dict[str, object]:
     try:
         response = service.process_question(str(case["question"]))
-        text = response.answer + "\n" + str(response.result_preview)
-        generalization_pass = all(keyword in text for keyword in case.get("must_include", []))
+        generalization_pass = _matches_expectations(service, response.answer, response.result_preview, case)
         if case.get("allow_empty"):
             generalization_pass = "图谱中未找到相关信息" in response.answer
 
@@ -89,6 +89,35 @@ def run_case(service: KGQAService, group_name: str, case: dict[str, object]) -> 
             "answer": str(exc),
             "stage_sources": {},
         }
+
+
+def _matches_expectations(
+    service: KGQAService,
+    answer: str,
+    preview: list[dict[str, Any]],
+    case: dict[str, object],
+) -> bool:
+    text = answer + "\n" + str(preview)
+    alias_lookup = _build_alias_lookup(service.schema.schema.get("column_aliases", {}))
+    return all(_keyword_matches(keyword, text, alias_lookup) for keyword in case.get("must_include", []))
+
+
+def _build_alias_lookup(column_aliases: dict[str, dict[str, list[str]]]) -> dict[str, set[str]]:
+    lookup: dict[str, set[str]] = {}
+    for canonical, alias_def in column_aliases.items():
+        alias_group = {canonical}
+        alias_group.update(str(item) for item in alias_def.get("zh", []))
+        alias_group.update(str(item) for item in alias_def.get("en", []))
+        for alias in alias_group:
+            lookup[alias] = set(alias_group)
+    return lookup
+
+
+def _keyword_matches(keyword: object, text: str, alias_lookup: dict[str, set[str]]) -> bool:
+    target = str(keyword)
+    if target in text:
+        return True
+    return any(alias in text for alias in alias_lookup.get(target, set()))
 
 
 # ---------------------------------------------------------------------------

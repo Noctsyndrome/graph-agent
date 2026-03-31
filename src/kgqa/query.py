@@ -126,6 +126,7 @@ class DomainRegistry:
         self._brands: list[str] = []
         self._cities: list[str] = []
         self._project_types: list[str] = []
+        self._project_statuses: list[str] = []
         self._categories: list[str] = []
         self._refrigerants: list[str] = []
 
@@ -136,6 +137,7 @@ class DomainRegistry:
         self._brands = self._flat(executor, f"MATCH (m:Model {{dataset: '{ds}'}}) RETURN DISTINCT m.brand AS v ORDER BY v")
         self._cities = self._flat(executor, f"MATCH (p:Project {{dataset: '{ds}'}}) RETURN DISTINCT p.city AS v ORDER BY v")
         self._project_types = self._flat(executor, f"MATCH (p:Project {{dataset: '{ds}'}}) RETURN DISTINCT p.type AS v ORDER BY v")
+        self._project_statuses = self._flat(executor, f"MATCH (p:Project {{dataset: '{ds}'}}) RETURN DISTINCT p.status AS v ORDER BY v")
         self._categories = self._flat(executor, f"MATCH (c:Category {{dataset: '{ds}'}}) WHERE c.parent_id IS NOT NULL RETURN c.name AS v ORDER BY v")
         self._refrigerants = self._flat(executor, f"MATCH (m:Model {{dataset: '{ds}'}}) RETURN DISTINCT m.refrigerant AS v ORDER BY v")
 
@@ -160,12 +162,35 @@ class DomainRegistry:
         return self._project_types
 
     @property
+    def project_statuses(self) -> list[str]:
+        return self._project_statuses
+
+    @property
     def categories(self) -> list[str]:
         return self._categories
 
     @property
     def refrigerants(self) -> list[str]:
         return self._refrigerants
+
+    def prompt_summary(self) -> str:
+        sections = [
+            ("客户名", self.customers),
+            ("品牌", self.brands),
+            ("城市", self.cities),
+            ("项目类型", self.project_types),
+            ("项目状态", self.project_statuses),
+            ("设备类别", self.categories),
+            ("制冷剂", self.refrigerants),
+        ]
+        lines = ["## 当前图谱中的关键枚举值"]
+        for label, values in sections:
+            if not values:
+                continue
+            preview = "、".join(values[:10])
+            suffix = " ..." if len(values) > 10 else ""
+            lines.append(f"- {label}: {preview}{suffix}")
+        return "\n".join(lines)
 
 
 class CypherGenerator:
@@ -192,8 +217,10 @@ class CypherGenerator:
             if retry
             else ""
         )
+        domain_summary = self.domain.prompt_summary()
         prompt = (
             f"{schema_context}\n\n"
+            f"{domain_summary}\n\n"
             f"## few-shot 示例\n{examples}\n\n"
             f"问题：{question}\n"
             f"意图：{intent_result.intent.value}\n"
@@ -202,6 +229,7 @@ class CypherGenerator:
             f"聚合需求：{intent_result.needs_aggregation}\n"
             f"多步需求：{intent_result.needs_multi_step}\n"
             "请生成单条只读 Cypher，只返回 Cypher 本身。"
+            " 如果问题里出现口语化类别、地区或项目状态表达，请优先使用上面枚举摘要中的真实值，不要自造接近但不存在的字面量。"
             f"{retry_instruction}"
         )
         system_prompt = (

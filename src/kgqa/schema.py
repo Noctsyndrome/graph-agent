@@ -133,6 +133,8 @@ class SchemaRegistry:
             mapping.setdefault("Project", set()).update(self._domain.cities)
             for pt in self._domain.project_types:
                 mapping.setdefault("Project", set()).add(pt)
+            for status in self._domain.project_statuses:
+                mapping.setdefault("Project", set()).add(status)
             for cat in self._domain.categories:
                 mapping.setdefault("Category", set()).add(cat)
                 mapping.setdefault("Model", set()).add(cat)
@@ -194,6 +196,9 @@ class SchemaRegistry:
             for project_type in self._domain.project_types:
                 if len(project_type) >= 2:
                     weights[project_type] = max(weights.get(project_type, 0), alias_weight)
+            for project_status in self._domain.project_statuses:
+                if len(project_status) >= 2:
+                    weights[project_status] = max(weights.get(project_status, 0), alias_weight)
             for brand in self._domain.brands:
                 if len(brand) >= 2:
                     weights[brand] = max(weights.get(brand, 0), domain_weight)

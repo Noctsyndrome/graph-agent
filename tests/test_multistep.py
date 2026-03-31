@@ -117,3 +117,12 @@ def test_domain_registry_exposes_dynamic_refrigerants() -> None:
     domain = DomainRegistry(get_settings())
     domain._refrigerants = ["R-22", "R-410A"]
     assert domain.refrigerants == ["R-22", "R-410A"]
+
+
+def test_domain_registry_exposes_dynamic_project_statuses_in_prompt_summary() -> None:
+    domain = DomainRegistry(get_settings())
+    domain._project_statuses = ["建设中", "规划", "运营中"]
+    summary = domain.prompt_summary()
+    assert domain.project_statuses == ["建设中", "规划", "运营中"]
+    assert "项目状态" in summary
+    assert "建设中" in summary
