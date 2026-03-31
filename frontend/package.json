@@ -10,12 +10,17 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@ag-ui/client": "^0.0.48",
-    "@copilotkit/react-core": "^1.54.1",
-    "@copilotkit/react-ui": "^1.54.1",
-    "@copilotkitnext/react": "^1.54.1",
+    "@assistant-ui/react": "^0.12.21",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-scroll-area": "^1.2.10",
+    "@radix-ui/react-tabs": "^1.1.13",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.7.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.5.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

@@ -50,7 +50,30 @@ export interface ChatSessionPayload {
   title: string;
   created_at: number;
   updated_at: number;
-  messages: Array<Record<string, unknown>>;
+  messages: BackendChatMessage[];
   state: Record<string, unknown>;
   status: string;
+}
+
+export interface BackendToolCall {
+  id: string;
+  type?: string;
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
+export interface BackendChatMessage {
+  id?: string;
+  role: string;
+  content?: unknown;
+  toolCalls?: BackendToolCall[];
+  toolCallId?: string | null;
+  created_at?: number;
+}
+
+export interface ChatStreamEvent {
+  type: string;
+  [key: string]: unknown;
 }

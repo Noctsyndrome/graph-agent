@@ -1,4 +1,6 @@
 import type {
+  BackendChatMessage,
+  ChatStreamEvent,
   ChatSessionPayload,
   ChatSessionSummary,
   ExampleGroup,
@@ -39,6 +41,65 @@ export function fetchSessions(): Promise<ChatSessionSummary[]> {
 
 export function fetchSessionPayload(sessionId: string): Promise<ChatSessionPayload> {
   return readJson<ChatSessionPayload>(`/chat/${sessionId}/messages`);
+}
+
+export async function streamChat(
+  sessionId: string,
+  messages: BackendChatMessage[],
+  state: Record<string, unknown>,
+  onEvent: (event: ChatStreamEvent) => void,
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      threadId: sessionId,
+      messages,
+      state,
+    }),
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`Chat stream failed: ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const flushChunk = (chunk: string) => {
+    const lines = chunk.split("\n");
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) {
+        continue;
+      }
+      const payload = trimmed.slice(5).trim();
+      if (!payload) {
+        continue;
+      }
+      onEvent(JSON.parse(payload) as ChatStreamEvent);
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
+    for (const frame of frames) {
+      flushChunk(frame);
+    }
+  }
+
+  if (buffer.trim()) {
+    flushChunk(buffer);
+  }
 }
 
 function normalizeExampleGroups(payload: Record<string, unknown>): ExampleGroup[] {
