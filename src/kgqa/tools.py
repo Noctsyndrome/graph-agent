@@ -5,8 +5,14 @@ from typing import Any
 from kgqa.config import Settings
 from kgqa.generator import AnswerGenerator
 from kgqa.llm import LLMClient
-from kgqa.models import IntentResult, IntentType, SerializedResult
-from kgqa.query import CypherSafetyValidator, DomainRegistry, Neo4jExecutor
+from kgqa.models import SerializedResult
+from kgqa.query import (
+    CypherSafetyValidator,
+    CypherValidationError,
+    DomainRegistry,
+    Neo4jExecutor,
+    diagnose_query_error,
+)
 from kgqa.schema import SchemaRegistry
 from kgqa.serializer import ResultSerializer
 
@@ -22,32 +28,75 @@ class KGQAToolbox:
         self.settings = settings
         self.schema = schema
         self.domain = domain
-        self.validator = CypherSafetyValidator()
+        self.validator = CypherSafetyValidator(settings.dataset_name, schema.schema)
         self.serializer = ResultSerializer()
         self.answer_generator = AnswerGenerator(settings, llm_client)
 
-    @staticmethod
-    def tool_specs() -> list[dict[str, Any]]:
+    def tool_specs(self) -> list[dict[str, Any]]:
+        entity_names = [str(entity.get("name", "")).strip() for entity in self.schema.schema.get("entities", [])]
+        relationship_names = [
+            str(relation.get("name", "")).strip()
+            for relation in self.schema.schema.get("relationships", [])
+        ]
+        domain_examples: list[str] = []
+        for entity_name, field_map in self.domain.as_dict().items():
+            for field_name in field_map:
+                domain_examples.append(f"{entity_name}.{field_name}")
+                if len(domain_examples) >= 4:
+                    break
+            if len(domain_examples) >= 4:
+                break
+        domain_example_text = ", ".join(domain_examples) if domain_examples else "Model.brand"
         return [
             {
                 "name": "get_schema_context",
-                "description": "读取当前图谱的 schema、关系路径和字段信息，帮助后续生成查询。",
+                "description": (
+                    "读取当前图谱的 schema、关系路径和字段信息。"
+                    f"当前实体: {', '.join(entity_names)}。"
+                    f"当前关系: {', '.join(relationship_names)}。"
+                ),
                 "args_schema": {"question": "string"},
             },
             {
                 "name": "list_domain_values",
-                "description": "读取图谱中各实体 filterable_fields 的真实枚举值。kind 可选，格式为 Entity.field。",
+                "description": (
+                    "读取图谱中各实体 filterable_fields 的真实枚举值。"
+                    f"kind 参数格式必须为 Entity.field，示例: {domain_example_text}。"
+                    "如果用户说的是简称、别名或模糊值，优先改用 match_value。"
+                ),
                 "args_schema": {"kind": "string | null"},
             },
             {
+                "name": "match_value",
+                "description": (
+                    "对单个用户提到的模糊值做匹配，返回精确值或最接近的候选值。"
+                    "适合类别简称、品牌简称、模糊别名等场景，例如 Category.name + 客梯。"
+                ),
+                "args_schema": {"entity": "string", "field": "string", "keyword": "string"},
+            },
+            {
                 "name": "validate_cypher",
-                "description": "校验生成的 Cypher 是否只读且符合安全限制。",
+                "description": (
+                    "校验生成的 Cypher 是否只读、是否符合当前 schema，"
+                    f"以及是否为当前数据集 {self.settings.dataset_name} 显式添加 dataset 过滤。"
+                ),
                 "args_schema": {"cypher": "string"},
             },
             {
                 "name": "execute_cypher",
-                "description": "执行只读 Cypher，返回查询结果行。",
+                "description": (
+                    "执行只读 Cypher，返回查询结果行。"
+                    f"执行前请先 validate_cypher，且所有 MATCH 节点必须限定 dataset = '{self.settings.dataset_name}'。"
+                    "如果执行报错且需要理解修复方向，可调用 diagnose_error。"
+                ),
                 "args_schema": {"cypher": "string"},
+            },
+            {
+                "name": "diagnose_error",
+                "description": (
+                    "解析 validate_cypher 或 execute_cypher 的错误，结合当前 schema 输出结构化修复建议。"
+                ),
+                "args_schema": {"cypher": "string", "error": "string | object"},
             },
             {
                 "name": "format_results",
@@ -75,27 +124,54 @@ class KGQAToolbox:
             return self.domain.as_dict()
         return self.domain.get_filtered(str(kind))
 
+    def match_value(self, entity: str, field: str, keyword: str) -> dict[str, Any]:
+        return self.domain.match_value(entity, field, keyword)
+
     def validate_cypher(self, cypher: str) -> dict[str, Any]:
         try:
             self.validator.validate(cypher)
-            return {"valid": True, "cypher": cypher}
+            return {"valid": True, "cypher": cypher, "status": "ok"}
+        except CypherValidationError as exc:
+            return {"valid": False, "cypher": cypher, "status": "error", "error": exc.to_payload()}
         except Exception as exc:
-            return {"valid": False, "cypher": cypher, "error": str(exc)}
+            return {
+                "valid": False,
+                "cypher": cypher,
+                "status": "error",
+                "error": {"code": "validation_failed", "message": str(exc)},
+            }
 
     def execute_cypher(self, cypher: str) -> dict[str, Any]:
         executor = Neo4jExecutor(self.settings)
         try:
             rows = executor.query(cypher)
+        except Exception as exc:
+            return {
+                "status": "error",
+                "error": {
+                    "code": "execution_failed",
+                    "message": str(exc),
+                    "hint": "请根据报错修正 Cypher 后重新执行。",
+                },
+            }
         finally:
             executor.close()
         return {
+            "status": "ok",
             "row_count": len(rows),
             "rows": rows,
         }
 
+    def diagnose_error(self, cypher: str, error: str | dict[str, Any]) -> dict[str, Any]:
+        return diagnose_query_error(
+            schema=self.schema.schema,
+            dataset_name=self.settings.dataset_name,
+            cypher=cypher,
+            error=error,
+        )
+
     def format_results(self, question: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
-        intent = self._infer_intent(question)
-        serialized = self.serializer.serialize(rows, question, intent)
+        serialized = self.serializer.serialize(rows, question=question)
         return {
             "renderer": self._infer_renderer(serialized),
             "payload": serialized.preview,
@@ -112,30 +188,18 @@ class KGQAToolbox:
             preview=list(formatted_result.get("preview", [])),
             row_count=int(formatted_result.get("row_count", 0)),
         )
-        intent = self._infer_intent(question)
-        intent_result = IntentResult(intent=intent)
         return self.answer_generator.compose_with_llm(
             question=question,
-            intent_result=intent_result,
             serialized_result=serialized,
             trace_summary="agent tool execution",
         )
 
     @staticmethod
     def _infer_renderer(serialized: SerializedResult) -> str:
-        if serialized.format in {"key_value"} and serialized.preview:
+        if serialized.format == "key_value" and serialized.preview:
             return "metric_cards"
+        if serialized.format == "empty":
+            return "raw_json"
         if serialized.preview:
             return "table"
         return "raw_json"
-
-    @staticmethod
-    def _infer_intent(question: str) -> IntentType:
-        text = question.replace(" ", "")
-        if any(keyword in text for keyword in ["平均", "占比", "最多", "最大", "最少", "总", "排名", "比较", "对比"]):
-            return IntentType.AGGREGATION
-        if any(keyword in text for keyword in ["替代", "有没有可替代", "多步", "之后还有没有"]):
-            return IntentType.MULTI_STEP
-        if any(keyword in text for keyword in ["客户", "项目", "品牌", "城市", "区域"]):
-            return IntentType.CROSS_DOMAIN
-        return IntentType.SINGLE_DOMAIN

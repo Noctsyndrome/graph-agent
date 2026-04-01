@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import difflib
 from typing import Any
 
 import yaml
@@ -37,6 +38,38 @@ def load_seed_data(settings: Settings) -> None:
     executor.load_seed_data(script)
 
 
+def inspect_dataset_readiness(
+    settings: Settings,
+    schema: dict[str, Any],
+    required_entities: list[str] | None = None,
+) -> dict[str, Any]:
+    executor = Neo4jExecutor(settings)
+    required = required_entities or ["Model", "Project"]
+    counts: dict[str, int] = {
+        "__all__": executor.count_dataset_nodes(settings.dataset_name),
+    }
+    for entity_name in required:
+        counts[entity_name] = executor.count_entity_nodes(entity_name)
+    available_entities = {
+        str(entity.get("name", "")).strip()
+        for entity in schema.get("entities", [])
+        if str(entity.get("name", "")).strip()
+    }
+    missing_entities = [
+        entity_name
+        for entity_name in required
+        if entity_name in available_entities and counts.get(entity_name, 0) == 0
+    ]
+    ready = counts["__all__"] > 0 and not missing_entities
+    return {
+        "ready": ready,
+        "dataset": settings.dataset_name,
+        "counts": counts,
+        "required_entities": [entity_name for entity_name in required if entity_name in available_entities],
+        "missing_entities": missing_entities,
+    }
+
+
 class Neo4jExecutor:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -64,6 +97,20 @@ class Neo4jExecutor:
                 {key: self._normalize_value(value) for key, value in record.items()}
                 for record in result
             ]
+
+    def count_dataset_nodes(self, dataset_name: str) -> int:
+        rows = self.query(f"MATCH (n) WHERE n.dataset = '{dataset_name}' RETURN count(n) AS count")
+        if not rows:
+            return 0
+        return int(rows[0].get("count", 0) or 0)
+
+    def count_entity_nodes(self, entity_name: str) -> int:
+        rows = self.query(
+            f"MATCH (n:{entity_name} {{dataset: '{self.settings.dataset_name}'}}) RETURN count(n) AS count"
+        )
+        if not rows:
+            return 0
+        return int(rows[0].get("count", 0) or 0)
 
     def load_seed_data(self, script: str) -> None:
         lines = []
@@ -126,25 +173,427 @@ class Neo4jExecutor:
 
 
 class CypherSafetyValidator:
+    _NODE_PATTERN = re.compile(
+        r"\(\s*(?P<var>[A-Za-z_]\w*)?\s*(?::\s*(?P<label>[A-Za-z_]\w*))?\s*(?:\{(?P<props>[^{}]*)\})?\s*\)"
+    )
+    _REL_PATTERN = re.compile(r"\[\s*(?:[A-Za-z_]\w*)?\s*:\s*(?P<name>[A-Za-z_]\w*)")
+    _PROPERTY_REF_PATTERN = re.compile(r"\b(?P<var>[A-Za-z_]\w*)\.(?P<prop>[A-Za-z_]\w*)\b")
+
     FORBIDDEN = ("CREATE", "MERGE", "DELETE", "SET", "REMOVE", "CALL DBMS", "DROP", "LOAD CSV")
     ALLOWED_START = ("MATCH", "WITH", "UNWIND")
+
+    def __init__(self, dataset_name: str = "", schema: dict[str, Any] | None = None):
+        self.dataset_name = dataset_name
+        self.schema = schema or {}
 
     def validate(self, cypher: str) -> None:
         normalized = cypher.strip().upper()
         if ";" in cypher.strip().rstrip(";"):
-            raise ValueError("只允许执行单条 Cypher 语句。")
+            raise CypherValidationError("multi_statement", "只允许执行单条 Cypher 语句。")
         if not normalized.startswith(self.ALLOWED_START):
-            raise ValueError("Cypher 必须以 MATCH、WITH 或 UNWIND 开头。")
+            raise CypherValidationError("invalid_start", "Cypher 必须以 MATCH、WITH 或 UNWIND 开头。")
         for token in self.FORBIDDEN:
             pattern = r"\b" + re.escape(token) + r"\b"
             if re.search(pattern, normalized):
-                raise ValueError(f"检测到不允许的操作: {token}")
+                raise CypherValidationError("forbidden_operation", f"检测到不允许的操作: {token}")
         if self._has_comparator_literal_in_property_map(cypher):
-            raise ValueError("检测到将范围/比较条件写成属性字符串，请改用 WHERE + 比较表达式。")
+            raise CypherValidationError(
+                "invalid_property_comparator",
+                "检测到将范围/比较条件写成属性字符串，请改用 WHERE + 比较表达式。",
+            )
+        self._validate_dataset_filters(cypher)
+        self._validate_schema_compliance(cypher)
 
     @staticmethod
     def _has_comparator_literal_in_property_map(cypher: str) -> bool:
         return bool(re.search(r"\{[^{}]*:\s*['\"]\s*[<>]=?.+?['\"][^{}]*\}", cypher))
+
+    def _validate_dataset_filters(self, cypher: str) -> None:
+        if not self.dataset_name:
+            return
+        missing_patterns: list[str] = []
+        seen_variables: set[str] = set()
+        for node in self._extract_node_patterns(cypher):
+            var_name = node.get("var")
+            label_name = node.get("label")
+            props = node.get("props", "")
+            if not var_name and not label_name:
+                continue
+            if self._node_has_dataset_constraint(cypher, var_name, props):
+                if var_name:
+                    seen_variables.add(var_name)
+                continue
+            if var_name and var_name in seen_variables:
+                continue
+            missing_patterns.append(node.get("pattern", ""))
+            if var_name:
+                seen_variables.add(var_name)
+        if missing_patterns:
+            raise CypherValidationError(
+                "missing_dataset_filter",
+                f"Cypher 缺少当前场景数据集 {self.dataset_name} 的过滤条件。",
+                details={
+                    "dataset": self.dataset_name,
+                    "patterns": missing_patterns,
+                },
+                hint=(
+                    "请为每个 MATCH 中的节点增加 dataset 过滤，例如 "
+                    f"(m:Model {{dataset: '{self.dataset_name}'}}) 或 WHERE m.dataset = '{self.dataset_name}'。"
+                ),
+            )
+
+    def _node_has_dataset_constraint(self, cypher: str, var_name: str | None, props: str) -> bool:
+        property_value = self._extract_dataset_value(props)
+        if property_value is not None:
+            if property_value != self.dataset_name:
+                raise CypherValidationError(
+                    "wrong_dataset_filter",
+                    f"Cypher 使用了错误的数据集过滤: {property_value}。",
+                    details={"expected": self.dataset_name, "actual": property_value},
+                    hint=f"请将 dataset 过滤统一改为 {self.dataset_name}。",
+                )
+            return True
+        if not var_name:
+            return False
+        patterns = [
+            rf"\b{re.escape(var_name)}\.dataset\s*=\s*['\"](?P<value>[^'\"]+)['\"]",
+            rf"['\"](?P<value>[^'\"]+)['\"]\s*=\s*{re.escape(var_name)}\.dataset\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, cypher, re.IGNORECASE)
+            if not match:
+                continue
+            actual_value = match.group("value")
+            if actual_value != self.dataset_name:
+                raise CypherValidationError(
+                    "wrong_dataset_filter",
+                    f"Cypher 使用了错误的数据集过滤: {actual_value}。",
+                    details={"expected": self.dataset_name, "actual": actual_value},
+                    hint=f"请将 dataset 过滤统一改为 {self.dataset_name}。",
+                )
+            return True
+        return False
+
+    @staticmethod
+    def _extract_dataset_value(props: str) -> str | None:
+        if not props:
+            return None
+        match = re.search(r"\bdataset\s*:\s*['\"](?P<value>[^'\"]+)['\"]", props, re.IGNORECASE)
+        if match is None:
+            return None
+        return match.group("value")
+
+    def _validate_schema_compliance(self, cypher: str) -> None:
+        if not self.schema:
+            return
+        entity_map = {
+            str(entity.get("name", "")).strip(): entity
+            for entity in self.schema.get("entities", [])
+            if str(entity.get("name", "")).strip()
+        }
+        relationship_names = {
+            str(relation.get("name", "")).strip()
+            for relation in self.schema.get("relationships", [])
+            if str(relation.get("name", "")).strip()
+        }
+        variable_labels: dict[str, str] = {}
+
+        for node in self._extract_node_patterns(cypher):
+            label_name = node.get("label")
+            var_name = node.get("var")
+            if label_name:
+                if label_name not in entity_map:
+                    raise CypherValidationError(
+                        "unknown_entity",
+                        f"实体 {label_name} 不存在于当前 schema 中。",
+                        details={"entity": label_name},
+                        hint=f"当前可用实体: {', '.join(sorted(entity_map))}。",
+                    )
+                if var_name:
+                    variable_labels[var_name] = label_name
+                self._validate_property_map_keys(node.get("props", ""), label_name, entity_map)
+
+        for relation_name in self._extract_relationship_names(cypher):
+            if relation_name not in relationship_names:
+                raise CypherValidationError(
+                    "unknown_relationship",
+                    f"关系 {relation_name} 不存在于当前 schema 中。",
+                    details={"relationship": relation_name},
+                    hint=f"当前可用关系: {', '.join(sorted(relationship_names))}。",
+                )
+
+        for match in self._PROPERTY_REF_PATTERN.finditer(cypher):
+            var_name = match.group("var")
+            property_name = match.group("prop")
+            label_name = variable_labels.get(var_name)
+            if label_name is None:
+                continue
+            allowed_properties = set(entity_map[label_name].get("properties", {}).keys())
+            if property_name not in allowed_properties:
+                similar_properties = _suggest_similar_tokens(property_name, sorted(allowed_properties))
+                suggestion_text = f"{label_name} 实体可用属性: {', '.join(sorted(allowed_properties))}。"
+                if similar_properties:
+                    suggestion_text += f" 可考虑使用相近字段: {', '.join(similar_properties)}。"
+                raise CypherValidationError(
+                    "unknown_property",
+                    f"属性 {label_name}.{property_name} 不存在于当前 schema 中。",
+                    details={
+                        "entity": label_name,
+                        "property": property_name,
+                        "allowed_properties": sorted(allowed_properties),
+                    },
+                    hint=suggestion_text,
+                )
+
+    def _validate_property_map_keys(
+        self,
+        props: str,
+        label_name: str,
+        entity_map: dict[str, dict[str, Any]],
+    ) -> None:
+        if not props:
+            return
+        allowed_properties = set(entity_map[label_name].get("properties", {}).keys())
+        for key in re.findall(r"\b([A-Za-z_]\w*)\s*:", props):
+            if key not in allowed_properties:
+                similar_properties = _suggest_similar_tokens(key, sorted(allowed_properties))
+                suggestion_text = f"{label_name} 实体可用属性: {', '.join(sorted(allowed_properties))}。"
+                if similar_properties:
+                    suggestion_text += f" 可考虑使用相近字段: {', '.join(similar_properties)}。"
+                raise CypherValidationError(
+                    "unknown_property",
+                    f"属性 {label_name}.{key} 不存在于当前 schema 中。",
+                    details={
+                        "entity": label_name,
+                        "property": key,
+                        "allowed_properties": sorted(allowed_properties),
+                    },
+                    hint=suggestion_text,
+                )
+
+    @classmethod
+    def _extract_node_patterns(cls, cypher: str) -> list[dict[str, str]]:
+        patterns: list[dict[str, str]] = []
+        for match in cls._NODE_PATTERN.finditer(cypher):
+            patterns.append(
+                {
+                    "pattern": match.group(0),
+                    "var": (match.group("var") or "").strip(),
+                    "label": (match.group("label") or "").strip(),
+                    "props": (match.group("props") or "").strip(),
+                }
+            )
+        return patterns
+
+    @classmethod
+    def _extract_relationship_names(cls, cypher: str) -> list[str]:
+        return [match.group("name") for match in cls._REL_PATTERN.finditer(cypher)]
+
+
+class CypherValidationError(ValueError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        details: dict[str, Any] | None = None,
+        hint: str | None = None,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details or {}
+        self.hint = hint
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"code": self.code, "message": self.message}
+        if self.details:
+            payload["details"] = self.details
+        if self.hint:
+            payload["hint"] = self.hint
+        return payload
+
+
+def diagnose_query_error(
+    schema: dict[str, Any],
+    dataset_name: str,
+    cypher: str,
+    error: str | dict[str, Any],
+) -> dict[str, Any]:
+    entity_map = {
+        str(entity.get("name", "")).strip(): entity
+        for entity in schema.get("entities", [])
+        if str(entity.get("name", "")).strip()
+    }
+    relationship_names = sorted(
+        str(relation.get("name", "")).strip()
+        for relation in schema.get("relationships", [])
+        if str(relation.get("name", "")).strip()
+    )
+    payload = _normalize_error_payload(error)
+    code = str(payload.get("code", "")).strip()
+    message = str(payload.get("message", "")).strip()
+    details = payload.get("details", {}) if isinstance(payload.get("details"), dict) else {}
+
+    diagnosis = {
+        "status": "ok",
+        "error_type": "unknown_error",
+        "problematic_token": None,
+        "entity": None,
+        "relationship": None,
+        "available_properties": [],
+        "available_relationships": relationship_names,
+        "suggestion": "请重新检查 schema、字段名、关系名和 dataset 过滤。",
+        "suggested_next_action": "修改 Cypher 后重新执行 validate_cypher",
+    }
+
+    if code in {"unknown_property"}:
+        entity_name = str(details.get("entity") or _extract_entity_from_message(message) or "")
+        property_name = str(details.get("property") or _extract_property_from_message(message) or "")
+        available_properties = sorted(entity_map.get(entity_name, {}).get("properties", {}).keys())
+        similar = _suggest_similar_tokens(property_name, available_properties)
+        diagnosis.update(
+            {
+                "error_type": "invalid_property",
+                "problematic_token": property_name or None,
+                "entity": entity_name or None,
+                "available_properties": available_properties,
+                "suggestion": _property_suggestion(entity_name, property_name, available_properties, similar),
+            }
+        )
+        return diagnosis
+
+    if code in {"unknown_entity"}:
+        entity_name = str(details.get("entity") or _extract_entity_from_message(message) or "")
+        diagnosis.update(
+            {
+                "error_type": "invalid_entity",
+                "problematic_token": entity_name or None,
+                "entity": entity_name or None,
+                "suggestion": f"当前场景可用实体为: {', '.join(sorted(entity_map))}。",
+            }
+        )
+        return diagnosis
+
+    if code in {"unknown_relationship"}:
+        relationship_name = str(details.get("relationship") or _extract_relationship_from_message(message) or "")
+        diagnosis.update(
+            {
+                "error_type": "invalid_relationship",
+                "problematic_token": relationship_name or None,
+                "relationship": relationship_name or None,
+                "suggestion": f"当前场景可用关系为: {', '.join(relationship_names)}。",
+            }
+        )
+        return diagnosis
+
+    if code in {"missing_dataset_filter", "wrong_dataset_filter"}:
+        diagnosis.update(
+            {
+                "error_type": "dataset_filter_error",
+                "problematic_token": dataset_name,
+                "suggestion": f"所有 MATCH 节点都必须显式限制 dataset = '{dataset_name}'。",
+            }
+        )
+        return diagnosis
+
+    property_match = re.search(r"Property '([^']+)' does not exist on node with label '([^']+)'", message)
+    if property_match:
+        property_name = property_match.group(1)
+        entity_name = property_match.group(2)
+        available_properties = sorted(entity_map.get(entity_name, {}).get("properties", {}).keys())
+        similar = _suggest_similar_tokens(property_name, available_properties)
+        diagnosis.update(
+            {
+                "error_type": "invalid_property",
+                "problematic_token": property_name,
+                "entity": entity_name,
+                "available_properties": available_properties,
+                "suggestion": _property_suggestion(entity_name, property_name, available_properties, similar),
+            }
+        )
+        return diagnosis
+
+    relationship_match = re.search(r"Unknown relationship type '([^']+)'", message)
+    if relationship_match:
+        relationship_name = relationship_match.group(1)
+        diagnosis.update(
+            {
+                "error_type": "invalid_relationship",
+                "problematic_token": relationship_name,
+                "relationship": relationship_name,
+                "suggestion": f"当前场景可用关系为: {', '.join(relationship_names)}。",
+            }
+        )
+        return diagnosis
+
+    variable_match = re.search(r"Variable `?([A-Za-z_]\w*)`? not defined", message, re.IGNORECASE)
+    if variable_match:
+        variable_name = variable_match.group(1)
+        diagnosis.update(
+            {
+                "error_type": "variable_not_defined",
+                "problematic_token": variable_name,
+                "suggestion": f"变量 {variable_name} 未定义，请检查 MATCH/WITH/RETURN 中的变量名是否一致。",
+            }
+        )
+        return diagnosis
+
+    return diagnosis
+
+
+def _normalize_error_payload(error: str | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(error, dict):
+        return {
+            "code": error.get("code", ""),
+            "message": error.get("message", ""),
+            "details": error.get("details", {}),
+            "hint": error.get("hint"),
+        }
+    return {"code": "", "message": str(error), "details": {}, "hint": None}
+
+
+def _extract_entity_from_message(message: str) -> str | None:
+    match = re.search(r"属性\s+([A-Za-z_]\w*)\.([A-Za-z_]\w+)", message)
+    if match:
+        return match.group(1)
+    match = re.search(r"实体\s+([A-Za-z_]\w+)", message)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _extract_property_from_message(message: str) -> str | None:
+    match = re.search(r"属性\s+[A-Za-z_]\w+\.([A-Za-z_]\w+)", message)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _extract_relationship_from_message(message: str) -> str | None:
+    match = re.search(r"关系\s+([A-Za-z_]\w+)", message)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _suggest_similar_tokens(token: str, candidates: list[str]) -> list[str]:
+    if not token:
+        return []
+    return difflib.get_close_matches(token, candidates, n=3, cutoff=0.35)
+
+
+def _property_suggestion(
+    entity_name: str,
+    property_name: str,
+    available_properties: list[str],
+    similar: list[str],
+) -> str:
+    if similar:
+        return (
+            f"当前场景中 {entity_name} 没有 {property_name} 属性。"
+            f"可考虑使用相近字段: {', '.join(similar)}。"
+        )
+    return f"{entity_name} 实体可用属性: {', '.join(available_properties)}。"
 
 
 class DomainRegistry:
@@ -197,13 +646,19 @@ class DomainRegistry:
     def get_values(self, entity_name: str, field_name: str) -> list[str]:
         return list(self._values.get(entity_name, {}).get(field_name, []))
 
+    def resolve_entity_name(self, entity_key: str) -> str | None:
+        return self._resolve_entity_name(entity_key)
+
+    def resolve_field_name(self, entity_name: str, field_key: str) -> str | None:
+        return self._resolve_field_name(entity_name, field_key)
+
+    def get_entity_fields(self, entity_name: str) -> list[str]:
+        return list(self._values.get(entity_name, {}).keys())
+
     def get_filtered(self, key: str) -> dict[str, dict[str, list[str]]]:
         normalized = key.strip()
         if not normalized:
             return {}
-        alias_entity, alias_field = self._resolve_alias(normalized)
-        if alias_entity and alias_field:
-            return {alias_entity: {alias_field: self.get_values(alias_entity, alias_field)}}
         if "." not in normalized:
             entity_name = self._resolve_entity_name(normalized)
             if entity_name is not None:
@@ -219,18 +674,76 @@ class DomainRegistry:
         values = self.get_values(entity_name, field_name)
         return {entity_name: {field_name: values}}
 
-    @staticmethod
-    def _resolve_alias(key: str) -> tuple[str | None, str | None]:
-        alias_map = {
-            "customers": ("Customer", "name"),
-            "brands": ("Model", "brand"),
-            "cities": ("Project", "city"),
-            "project_types": ("Project", "type"),
-            "project_statuses": ("Project", "status"),
-            "categories": ("Category", "name"),
-            "refrigerants": ("Model", "refrigerant"),
+    def match_value(self, entity_key: str, field_key: str, keyword: str) -> dict[str, Any]:
+        entity_name = self._resolve_entity_name(entity_key)
+        if entity_name is None:
+            return {
+                "status": "error",
+                "entity": entity_key,
+                "field": field_key,
+                "keyword": keyword,
+                "exact_match": None,
+                "fuzzy_matches": [],
+                "hint": f"未知实体 {entity_key}。当前可用实体: {', '.join(sorted(self._values))}。",
+            }
+        field_name = self._resolve_field_name(entity_name, field_key)
+        if field_name is None:
+            return {
+                "status": "error",
+                "entity": entity_name,
+                "field": field_key,
+                "keyword": keyword,
+                "exact_match": None,
+                "fuzzy_matches": [],
+                "hint": f"{entity_name} 可用字段: {', '.join(self.get_entity_fields(entity_name))}。",
+            }
+        values = self.get_values(entity_name, field_name)
+        if not keyword.strip():
+            return {
+                "status": "error",
+                "entity": entity_name,
+                "field": field_name,
+                "keyword": keyword,
+                "exact_match": None,
+                "fuzzy_matches": [],
+                "hint": "keyword 不能为空。",
+            }
+        normalized_keyword = self._normalize_match_text(keyword)
+        for value in values:
+            if self._normalize_match_text(value) == normalized_keyword:
+                return {
+                    "status": "ok",
+                    "entity": entity_name,
+                    "field": field_name,
+                    "keyword": keyword,
+                    "exact_match": value,
+                    "fuzzy_matches": [],
+                    "hint": "已找到精确匹配，可直接使用该值。",
+                }
+        scored = []
+        for value in values:
+            normalized_value = self._normalize_match_text(value)
+            contains = normalized_keyword in normalized_value or normalized_value in normalized_keyword
+            similarity = difflib.SequenceMatcher(None, normalized_keyword, normalized_value).ratio()
+            scored.append((1 if contains else 0, similarity, value))
+        scored.sort(key=lambda item: (item[0], item[1], len(item[2])), reverse=True)
+        fuzzy_matches = [value for _, similarity, value in scored if similarity > 0.25][:5]
+        hint = "未找到精确匹配，建议使用候选值。" if fuzzy_matches else "未找到可用候选，请先查看完整枚举值。"
+        return {
+            "status": "ok",
+            "entity": entity_name,
+            "field": field_name,
+            "keyword": keyword,
+            "exact_match": None,
+            "fuzzy_matches": fuzzy_matches,
+            "hint": hint,
         }
-        return alias_map.get(key, (None, None))
+
+    @staticmethod
+    def _normalize_match_text(value: str) -> str:
+        normalized = value.strip().lower()
+        normalized = re.sub(r"[\s\-_/]+", "", normalized)
+        return normalized
 
     def _resolve_entity_name(self, entity_key: str) -> str | None:
         normalized = entity_key.strip().lower()
@@ -245,34 +758,6 @@ class DomainRegistry:
             if field_name.lower() == normalized:
                 return field_name
         return None
-
-    @property
-    def customers(self) -> list[str]:
-        return self.get_values("Customer", "name")
-
-    @property
-    def brands(self) -> list[str]:
-        return self.get_values("Model", "brand")
-
-    @property
-    def cities(self) -> list[str]:
-        return self.get_values("Project", "city")
-
-    @property
-    def project_types(self) -> list[str]:
-        return self.get_values("Project", "type")
-
-    @property
-    def project_statuses(self) -> list[str]:
-        return self.get_values("Project", "status")
-
-    @property
-    def categories(self) -> list[str]:
-        return self.get_values("Category", "name")
-
-    @property
-    def refrigerants(self) -> list[str]:
-        return self.get_values("Model", "refrigerant")
 
     def prompt_summary(self) -> str:
         lines = ["## 当前图谱中的关键枚举值"]

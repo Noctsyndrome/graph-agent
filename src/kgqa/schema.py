@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
+import re
 
 import yaml
 
@@ -83,34 +84,24 @@ class SchemaRegistry:
         for entity in self._schema.get("entities", []):
             name = entity["name"]
             keywords: set[str] = set()
-            # Add Chinese descriptions from schema
-            desc = entity.get("description", "")
+            desc = str(entity.get("description", "")).strip()
             if desc:
-                keywords.add(desc.replace("信息", "").replace("记录", ""))
-            # Add property names that are meaningful query terms
+                keywords.add(desc)
+                for token in self._description_tokens(desc):
+                    keywords.add(token)
+            keywords.add(name)
             for prop in entity.get("filterable_fields", []):
-                keywords.add(prop)
-            mapping[name] = keywords
+                prop_name = str(prop).strip()
+                if prop_name:
+                    keywords.add(prop_name)
+            mapping[name] = {item for item in keywords if item}
 
-        # Schema-level generic keywords per entity type
-        mapping.setdefault("Customer", set()).update(["客户"])
-        mapping.setdefault("Project", set()).update(["项目", "城市", "区域"])
-        mapping.setdefault("Model", set()).update(["设备", "型号", "品牌", "参数"])
-        mapping.setdefault("Installation", set()).update(["安装", "数量", "用了", "使用"])
-        mapping.setdefault("Category", set()).update(["类别", "类型"])
-
-        # Inject domain-specific values from Neo4j (customer names, brands, etc.)
         if self._domain:
-            mapping.setdefault("Customer", set()).update(self._domain.customers)
-            mapping.setdefault("Model", set()).update(self._domain.brands)
-            mapping.setdefault("Project", set()).update(self._domain.cities)
-            for pt in self._domain.project_types:
-                mapping.setdefault("Project", set()).add(pt)
-            for status in self._domain.project_statuses:
-                mapping.setdefault("Project", set()).add(status)
-            for cat in self._domain.categories:
-                mapping.setdefault("Category", set()).add(cat)
-                mapping.setdefault("Model", set()).add(cat)
+            for entity_name, field_map in self._domain.as_dict().items():
+                entity_keywords = mapping.setdefault(entity_name, set())
+                for field_name, values in field_map.items():
+                    entity_keywords.add(field_name)
+                    entity_keywords.update(str(value) for value in values if str(value).strip())
 
         return mapping
 
@@ -123,4 +114,27 @@ class SchemaRegistry:
         for entity in entities:
             if entity in {e["name"] for e in self._schema.get("entities", [])}:
                 focus.add(entity)
-        return focus
+        if not focus:
+            return focus
+        expanded = set(focus)
+        for relation in self._schema.get("relationships", []):
+            from_entity = str(relation.get("from", "")).strip()
+            to_entity = str(relation.get("to", "")).strip()
+            if from_entity in focus and to_entity:
+                expanded.add(to_entity)
+            if to_entity in focus and from_entity:
+                expanded.add(from_entity)
+        return expanded
+
+    @staticmethod
+    def _description_tokens(description: str) -> set[str]:
+        cleaned = description.strip()
+        base = re.sub(r"(信息|记录|数据|实体)$", "", cleaned)
+        tokens = {cleaned, base}
+        for part in re.split(r"[·/、\s]", base):
+            if part:
+                tokens.add(part)
+        suffix_match = re.search(r"(客户|项目|城市|区域|品牌|型号|参数|安装|类型|类别)$", base)
+        if suffix_match:
+            tokens.add(suffix_match.group(1))
+        return {token for token in tokens if token}
