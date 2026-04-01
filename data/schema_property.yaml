@@ -1,0 +1,150 @@
+dataset: property_ops
+description: 物业资产经营知识图谱问答演示数据集
+entities:
+  - name: OperatingCompany
+    description: 物业经营平台公司
+    properties:
+      id: string
+      name: string
+      parent_group: string
+      region: string
+      scale: string
+      dataset: string
+    filterable_fields: [name, parent_group, region, scale]
+  - name: OperatingProject
+    description: 经营项目
+    properties:
+      id: string
+      name: string
+      type: string
+      city: string
+      total_area_sqm: number
+      opening_date: date
+      status: string
+      dataset: string
+    filterable_fields: [name, type, city, status, opening_date]
+  - name: Space
+    description: 项目空间
+    properties:
+      id: string
+      name: string
+      floor: string
+      area_sqm: number
+      space_type: string
+      monthly_rent_yuan: number
+      dataset: string
+    filterable_fields: [name, floor, space_type, area_sqm, monthly_rent_yuan]
+  - name: Tenant
+    description: 租户
+    properties:
+      id: string
+      name: string
+      industry: string
+      brand_level: string
+      dataset: string
+    filterable_fields: [name, industry, brand_level]
+  - name: Lease
+    description: 租赁合同
+    properties:
+      id: string
+      start_date: date
+      end_date: date
+      monthly_rent: number
+      deposit: number
+      rent_free_months: number
+      status: string
+      dataset: string
+    filterable_fields: [start_date, end_date, monthly_rent, status]
+  - name: Payment
+    description: 租金付款记录
+    properties:
+      id: string
+      period: string
+      amount: number
+      due_date: date
+      paid_date: date
+      status: string
+      dataset: string
+    filterable_fields: [period, status, amount, due_date]
+relationships:
+  - name: MANAGES_PROJECT
+    from: OperatingCompany
+    to: OperatingProject
+    cardinality: 1:N
+    direction: out
+  - name: HAS_SPACE
+    from: OperatingProject
+    to: Space
+    cardinality: 1:N
+    direction: out
+  - name: OCCUPIED_BY
+    from: Space
+    to: Tenant
+    cardinality: N:1
+    direction: out
+  - name: HAS_LEASE
+    from: Tenant
+    to: Lease
+    cardinality: 1:N
+    direction: out
+  - name: LEASE_FOR_SPACE
+    from: Lease
+    to: Space
+    cardinality: N:1
+    direction: out
+  - name: HAS_PAYMENT
+    from: Lease
+    to: Payment
+    cardinality: 1:N
+    direction: out
+paths:
+  SINGLE_DOMAIN:
+    - OperatingProject -> Space
+    - Tenant -> Lease -> Payment
+  CROSS_DOMAIN:
+    - OperatingCompany -> OperatingProject -> Space -> Tenant
+    - OperatingProject -> Space -> Tenant -> Lease
+  AGGREGATION:
+    - OperatingCompany -> OperatingProject -> Space
+    - Tenant -> Lease -> Payment
+  MULTI_STEP:
+    - OperatingCompany[filter] -> OperatingProject[filter] -> Space[filter] -> Tenant[filter]
+    - Tenant -> Lease[status] -> Payment[status]
+column_aliases:
+  经营公司:
+    zh: [平台公司, 经营平台, 物业公司]
+    en: [operating_company, company]
+  项目:
+    zh: [经营项目, 门店项目, 商业项目]
+    en: [project, operating_project]
+  空间:
+    zh: [铺位, 铺面, 单元]
+    en: [space, unit]
+  租户:
+    zh: [品牌租户, 商户]
+    en: [tenant]
+  合同:
+    zh: [租赁合同]
+    en: [lease]
+  付款:
+    zh: [租金付款, 回款]
+    en: [payment]
+  空置率:
+    zh: [空铺率]
+    en: [vacancy_rate]
+  月租:
+    zh: [月租金, 月租总额]
+    en: [monthly_rent]
+  月租单价:
+    zh: [租金单价]
+    en: [monthly_rent_yuan]
+few_shot_scoring:
+  entity_description_weight: 1
+  column_alias_weight: 2
+  domain_value_weight: 3
+  relationship_weight: 2
+answer_formats:
+  property_query: key_value
+  compare_query: markdown_table
+  list_query: numbered_list
+  aggregation_query: ranking_table

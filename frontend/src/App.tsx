@@ -308,7 +308,7 @@ export default function App() {
   const [statusText, setStatusText] = useState("准备就绪");
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [scenarioPickerOpen, setScenarioPickerOpen] = useState(false);
-  const [, setLoadingState] = useState("正在加载系统状态");
+  const [loadingState, setLoadingState] = useState("正在加载系统状态");
   const [globalError, setGlobalError] = useState<string | null>(null);
 
   const currentSessionIdRef = useRef(currentSessionId);
@@ -484,6 +484,10 @@ export default function App() {
       if (!text || isRunning) {
         return;
       }
+      if (loadingState) {
+        setStatusText(loadingState);
+        return;
+      }
       if (!sessionPayload.scenario_id) {
         setScenarioPickerOpen(true);
         return;
@@ -514,7 +518,7 @@ export default function App() {
         setGlobalError(error instanceof Error ? error.message : String(error));
       }
     },
-    [handleStreamEvent, isRunning, refreshSessions, sessionPayload.scenario_id, syncSnapshotState],
+    [handleStreamEvent, isRunning, loadingState, refreshSessions, sessionPayload.scenario_id, syncSnapshotState],
   );
 
   const handleComposerSubmit = useCallback(
@@ -551,6 +555,12 @@ export default function App() {
       ? "等待图谱摘要"
       : "请先选择场景";
   const neo4jConnected = Boolean(schemaSummary);
+  const startupPending = Boolean(loadingState);
+  const composerDisabledReason = startupPending
+    ? `${loadingState}，暂时不能发起问答。`
+    : !sessionPayload.scenario_id
+      ? "请先选择场景，然后开始提问。"
+      : null;
 
   return (
     <div className="app-shell">
@@ -660,6 +670,9 @@ export default function App() {
               isRunning={isRunning}
               statusText={statusText}
               suggestions={suggestionCards}
+              startupHint={startupPending ? loadingState : null}
+              composerDisabled={startupPending || !sessionPayload.scenario_id}
+              composerDisabledReason={composerDisabledReason}
               onSubmit={handleComposerSubmit}
               onSuggestionClick={(question) => {
                 void runQuestion(question);

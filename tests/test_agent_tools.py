@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from kgqa.config import get_settings
 from kgqa.query import DomainRegistry
+from kgqa.scenario import build_scenario_settings, get_scenario_definition
 from kgqa.schema import SchemaRegistry
 from kgqa.tools import KGQAToolbox
 
@@ -22,6 +23,23 @@ def _build_toolbox() -> KGQAToolbox:
     }
     schema = SchemaRegistry(settings, domain=domain)
     return KGQAToolbox(settings, schema, domain, _DummyLLMClient())  # type: ignore[arg-type]
+
+
+def _build_property_toolbox() -> KGQAToolbox:
+    settings = get_settings()
+    scenario = get_scenario_definition("property")
+    scenario_settings = build_scenario_settings(settings, scenario)
+    domain = DomainRegistry(scenario_settings)
+    domain._values = {
+        "OperatingCompany": {"name": ["万物云"], "region": ["华南"]},
+        "OperatingProject": {"name": ["万象城深圳店"], "type": ["购物中心"], "city": ["深圳"]},
+        "Space": {"space_type": ["零售", "餐饮"], "floor": ["1F", "2F"]},
+        "Tenant": {"name": ["星巴克"], "industry": ["餐饮"], "brand_level": ["国际一线"]},
+        "Lease": {"status": ["生效中"], "monthly_rent": ["36000"]},
+        "Payment": {"status": ["已付", "逾期"], "period": ["2025-01"]},
+    }
+    schema = SchemaRegistry(scenario_settings, domain=domain)
+    return KGQAToolbox(scenario_settings, schema, domain, _DummyLLMClient())  # type: ignore[arg-type]
 
 
 def test_list_domain_values_returns_expected_kind() -> None:
@@ -81,3 +99,24 @@ def test_diagnose_error_returns_structured_property_advice() -> None:
     assert payload["error_type"] == "invalid_property"
     assert payload["entity"] == "Model"
     assert "brand" in payload["available_properties"]
+
+
+def test_property_toolbox_match_value_supports_heterogeneous_entities() -> None:
+    toolbox = _build_property_toolbox()
+    payload = toolbox.match_value("OperatingProject", "type", "购物")
+    assert payload["status"] == "ok"
+    assert payload["exact_match"] is None
+    assert "购物中心" in payload["fuzzy_matches"]
+
+
+def test_domain_registry_skips_number_and_date_filterable_fields() -> None:
+    settings = get_settings()
+    scenario = get_scenario_definition("property")
+    scenario_settings = build_scenario_settings(settings, scenario)
+    domain = DomainRegistry(scenario_settings)
+
+    assert domain._should_load_field("name", "string") is True
+    assert domain._should_load_field("status", "string") is True
+    assert domain._should_load_field("opening_date", "date") is False
+    assert domain._should_load_field("monthly_rent", "number") is False
+    assert domain._should_load_field("amount", "number") is False

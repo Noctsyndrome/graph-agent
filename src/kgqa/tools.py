@@ -70,7 +70,7 @@ class KGQAToolbox:
                 "name": "match_value",
                 "description": (
                     "对单个用户提到的模糊值做匹配，返回精确值或最接近的候选值。"
-                    "适合类别简称、品牌简称、模糊别名等场景，例如 Category.name + 客梯。"
+                    "适合类别简称、品牌简称、模糊别名等场景。"
                 ),
                 "args_schema": {"entity": "string", "field": "string", "keyword": "string"},
             },

@@ -34,12 +34,12 @@ def test_session_store_roundtrip() -> None:
     assert payload.state["latestResult"]["renderer"] == "raw_json"
 
 
-def test_scenarios_endpoint_returns_hvac_and_elevator() -> None:
+def test_scenarios_endpoint_returns_hvac_elevator_and_property() -> None:
     client = TestClient(app)
     response = client.get("/scenarios")
     assert response.status_code == 200
     payload = response.json()
-    assert {item["id"] for item in payload} == {"elevator", "hvac"}
+    assert {item["id"] for item in payload} == {"elevator", "hvac", "property"}
 
 
 def test_chat_stream_endpoint_returns_sse(monkeypatch) -> None:

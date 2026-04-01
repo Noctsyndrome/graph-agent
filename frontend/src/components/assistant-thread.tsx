@@ -31,6 +31,9 @@ type AssistantThreadProps = {
   isRunning: boolean;
   statusText: string;
   suggestions: SuggestionItem[];
+  startupHint?: string | null;
+  composerDisabled?: boolean;
+  composerDisabledReason?: string | null;
   onSubmit: (message: AppendMessage) => Promise<void>;
   onSuggestionClick: (question: string) => void;
   onToolClick: (selection: ToolSelection) => void;
@@ -155,9 +158,11 @@ function AssistantMessageBubble({ onToolClick }: { onToolClick: (selection: Tool
 
 function EmptyState({
   suggestions,
+  notice,
   onSuggestionClick,
 }: {
   suggestions: SuggestionItem[];
+  notice?: string | null;
   onSuggestionClick: (question: string) => void;
 }) {
   const pageSize = 4;
@@ -179,6 +184,12 @@ function EmptyState({
         <h2>提出一个问题，或从快捷卡片开始</h2>
         <p>系统会自动理解图谱、执行查询，并将工具过程收敛到详情面板。</p>
       </div>
+      {notice ? (
+        <div className="thread-notice-banner">
+          <Loader2 size={14} className="spin" />
+          <span>{notice}</span>
+        </div>
+      ) : null}
       {suggestions.length > 0 ? (
         <div className="thread-suggestions-header">
           <span>快捷问题</span>
@@ -219,6 +230,9 @@ export function AssistantThread({
   isRunning,
   statusText,
   suggestions,
+  startupHint,
+  composerDisabled = false,
+  composerDisabledReason,
   onSubmit,
   onSuggestionClick,
   onToolClick,
@@ -234,7 +248,7 @@ export function AssistantThread({
       <ThreadPrimitive.Root className="thread-root">
         <ThreadPrimitive.Viewport className="thread-viewport" autoScroll scrollToBottomOnRunStart>
           <ThreadPrimitive.Empty>
-            <EmptyState suggestions={suggestions} onSuggestionClick={onSuggestionClick} />
+            <EmptyState suggestions={suggestions} notice={startupHint} onSuggestionClick={onSuggestionClick} />
           </ThreadPrimitive.Empty>
 
           <div className="thread-stream">
@@ -264,18 +278,26 @@ export function AssistantThread({
             <ArrowDown size={16} />
           </ThreadPrimitive.ScrollToBottom>
 
-          <ComposerPrimitive.Root className="thread-composer">
-            <button className="thread-composer-icon" type="button" aria-label="附加操作">
+          {composerDisabledReason ? <div className="thread-composer-hint">{composerDisabledReason}</div> : null}
+
+          <ComposerPrimitive.Root className={`thread-composer ${composerDisabled ? "is-disabled" : ""}`}>
+            <button
+              className="thread-composer-icon"
+              type="button"
+              aria-label="附加操作"
+              disabled={composerDisabled}
+            >
               <Plus size={17} />
             </button>
             <ComposerPrimitive.Input
               className="thread-composer-input"
-              placeholder="输入问题，继续追问，或让 Agent 基于当前会话继续分析..."
+              placeholder={composerDisabledReason ?? "输入问题，继续追问，或让 Agent 基于当前会话继续分析..."}
               submitMode="enter"
               rows={1}
               maxRows={8}
+              disabled={composerDisabled}
             />
-            <ComposerPrimitive.Send className="thread-composer-send" aria-label="发送">
+            <ComposerPrimitive.Send className="thread-composer-send" aria-label="发送" disabled={composerDisabled}>
               <SendHorizontal size={18} />
             </ComposerPrimitive.Send>
           </ComposerPrimitive.Root>

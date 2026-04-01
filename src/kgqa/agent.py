@@ -138,6 +138,42 @@ class KGQAAgent:
         formatted_result: dict[str, Any] | None = None
         final_answer: str | None = None
 
+        # ------------------------------------------------------------------
+        # Pre-step: auto-inject schema context on new conversations so LLM
+        # always has graph structure before making any decisions.
+        # ------------------------------------------------------------------
+        if not self._has_recent_schema_context(messages):
+            pre_step_name = "agent_pre_step_schema"
+            yield self._sse({"type": "STEP_STARTED", "stepName": pre_step_name, "timestamp": time.time()})
+            schema_result, _, messages, state = self._run_tool(
+                thread_id=thread_id,
+                messages=messages,
+                state=state,
+                tool_name="get_schema_context",
+                tool_args={"question": question},
+            )
+            # Pre-step does NOT consume budget – it's mandatory infrastructure.
+            for event in self.drain_buffered_events(state):
+                yield self._sse(event)
+            observations.append(
+                {
+                    "tool_name": "get_schema_context",
+                    "status": "ok",
+                    "tool_args": {"question": question},
+                    "tool_result": self._summarize_observation("get_schema_context", schema_result, "ok"),
+                }
+            )
+            upsert_session(
+                thread_id,
+                scenario_id=session_scenario_id,
+                scenario_label=self.scenario_label,
+                dataset_name=self.dataset_name,
+                messages=messages,
+                state=self._public_state(state),
+                status="running",
+            )
+            yield self._sse({"type": "STEP_FINISHED", "stepName": pre_step_name, "timestamp": time.time()})
+
         try:
             step_index = 0
             while step_index < self.MAX_TOTAL_TURNS and (
@@ -147,7 +183,7 @@ class KGQAAgent:
                 step_name = f"agent_step_{step_index}"
                 yield self._sse({"type": "STEP_STARTED", "stepName": step_name, "timestamp": time.time()})
                 decision = self._decide_next_action(question, messages, observations, formatted_result, state)
-                decision_issue = self._validate_decision(decision)
+                decision_issue = self._validate_decision(decision, state)
                 if decision_issue is not None:
                     observations.append(decision_issue)
                     state["toolHistory"] = list(state.get("toolHistory", [])) + [decision_issue | {"timestamp": time.time()}]
@@ -160,19 +196,21 @@ class KGQAAgent:
                         state=self._public_state(state),
                         status="running",
                     )
+                    yield self._sse(self._decision_issue_event(decision_issue))
                     yield self._sse({"type": "STEP_FINISHED", "stepName": step_name, "timestamp": time.time()})
                     continue
 
                 if decision.get("action") == "finish":
                     if formatted_result is None and state.get("_latest_rows") is None:
-                        observations.append(
-                            self._decision_error(
-                                code="finish_without_result",
-                                message="当前还没有稳定结果，不能直接 finish。",
-                                decision=decision,
-                                hint="请继续使用 validate_cypher、execute_cypher、format_results，或先调用辅助工具补齐信息。",
-                            )
+                        issue = self._decision_error(
+                            code="finish_without_result",
+                            message="当前还没有稳定结果，不能直接 finish。",
+                            decision=decision,
+                            hint="请继续使用 validate_cypher、execute_cypher、format_results，或先调用辅助工具补齐信息。",
                         )
+                        observations.append(issue)
+                        state["toolHistory"] = list(state.get("toolHistory", [])) + [issue | {"timestamp": time.time()}]
+                        yield self._sse(self._decision_issue_event(issue))
                         yield self._sse({"type": "STEP_FINISHED", "stepName": step_name, "timestamp": time.time()})
                         continue
                     final_answer = decision.get("final_answer")
@@ -186,14 +224,15 @@ class KGQAAgent:
                     yield self._sse({"type": "STEP_FINISHED", "stepName": step_name, "timestamp": time.time()})
                     break
                 if not self._has_budget_for_tool(state, tool_name):
-                    observations.append(
-                        self._decision_error(
-                            code="budget_exhausted",
-                            message=f"{tool_name} 对应的预算已耗尽。",
-                            decision=decision,
-                            hint=self._budget_exhausted_hint(tool_name),
-                        )
+                    issue = self._decision_error(
+                        code="budget_exhausted",
+                        message=f"{tool_name} 对应的预算已耗尽。",
+                        decision=decision,
+                        hint=self._budget_exhausted_hint(tool_name),
                     )
+                    observations.append(issue)
+                    state["toolHistory"] = list(state.get("toolHistory", [])) + [issue | {"timestamp": time.time()}]
+                    yield self._sse(self._decision_issue_event(issue))
                     yield self._sse({"type": "STEP_FINISHED", "stepName": step_name, "timestamp": time.time()})
                     continue
 
@@ -287,44 +326,22 @@ class KGQAAgent:
         state: dict[str, Any],
     ) -> dict[str, Any]:
         tool_specs = self.toolbox.tool_specs()
-        transcript = self._messages_for_prompt(messages)
-        has_recent_schema_context = self._has_recent_schema_context(messages)
-        observations_text = json.dumps(observations[-6:], ensure_ascii=False, indent=2)
-        failure_text = json.dumps(
-            [item for item in observations[-6:] if item.get("status") == "error"],
-            ensure_ascii=False,
-            indent=2,
-        )
-        budget_text = json.dumps(self._budget_snapshot(state), ensure_ascii=False)
-        prompt = (
-            f"当前问题：{question}\n\n"
-            f"会话消息：\n{transcript}\n\n"
-            f"工具观察：\n{observations_text}\n\n"
-            f"最近失败观察（如果为空说明暂无失败）：\n{failure_text}\n\n"
-            f"当前预算：{budget_text}\n\n"
-            f"当前会话最近是否已有 schema 上下文：{'是' if has_recent_schema_context else '否'}\n"
-            f"是否已有格式化结果：{formatted_result is not None}\n"
-            f"可用工具：\n{json.dumps(tool_specs, ensure_ascii=False, indent=2)}\n\n"
-            "请输出 JSON："
-            '{"thought": str, "action": "call_tool|finish", "tool_name": str | null, '
-            '"tool_args": object, "final_answer": str | null, "auto_finish_after_format": bool}。'
-        )
-        system_prompt = (
-            "你是企业知识图谱问答 Agent。"
-            "你的职责是通过工具逐步完成问题求解，而不是凭空回答。"
-            f"当前场景数据集是 {self.dataset_name}。所有 MATCH 节点都必须显式限制 dataset = '{self.dataset_name}'。"
-            "预算规则：get_schema_context、list_domain_values、match_value、diagnose_error 使用辅助预算；"
-            "validate_cypher、execute_cypher、format_results 使用主预算。"
-            "schema 使用策略：新问题开始、问题明显跨实体/多跳、或你对关系路径不确定时，优先调用 get_schema_context；"
-            "如果当前会话最近已经有足够相关的 schema context，后续追问默认不要重复调用；"
-            "只有在问题焦点明显变化，或 validate_cypher/execute_cypher 失败且怀疑 schema 理解不足时，才再次调用 get_schema_context。"
-            "原则：如果对图谱结构不确定，先读取 schema、domain values 或 match_value；"
-            "如果要执行 Cypher，先 validate_cypher，再 execute_cypher；"
-            "如果 validate_cypher 或 execute_cypher 失败，必要时调用 diagnose_error；"
-            "如果最近一次 observation.status=error，优先修复错误，不要直接 finish。"
-            "拿到 rows 后优先调用 format_results。"
-            "只有在已有足够结果时才能 finish。"
-            "只输出 JSON，不要解释。"
+        candidate_domain_matches = self._candidate_domain_matches(question)
+        budget = self._budget_snapshot(state)
+        current_phase = self._infer_current_phase(observations, formatted_result, state)
+        recent_errors = [item for item in observations[-4:] if item.get("status") == "error"]
+
+        system_prompt = self._build_system_prompt()
+        prompt = self._build_user_prompt(
+            question=question,
+            messages=messages,
+            observations=observations,
+            formatted_result=formatted_result,
+            tool_specs=tool_specs,
+            candidate_domain_matches=candidate_domain_matches,
+            budget=budget,
+            current_phase=current_phase,
+            recent_errors=recent_errors,
         )
         try:
             payload = self.llm_client.generate_json(prompt=prompt, system_prompt=system_prompt)
@@ -356,6 +373,184 @@ class KGQAAgent:
             "auto_finish_after_format": bool(payload.get("auto_finish_after_format", True)),
         }
 
+    # ------------------------------------------------------------------
+    # Prompt construction
+    # ------------------------------------------------------------------
+
+    def _build_system_prompt(self) -> str:
+        schema_entities = [
+            str(e.get("name", "")) for e in self.schema.schema.get("entities", [])
+        ]
+        schema_relationships = [
+            f"({r.get('from')})-[:{r.get('name')}]->({r.get('to')})"
+            for r in self.schema.schema.get("relationships", [])
+        ]
+        return (
+            "# 角色\n"
+            "你是企业知识图谱问答 Agent。你必须通过工具逐步求解，禁止凭空回答。\n"
+            "只输出 JSON，不要解释。\n\n"
+            "# 当前图谱概要\n"
+            f"- 数据集: {self.dataset_name}\n"
+            f"- 实体: {', '.join(schema_entities)}\n"
+            f"- 关系: {'; '.join(schema_relationships)}\n\n"
+            "# 工作流（必须按阶段推进）\n"
+            "你的每一步决策必须遵循以下三阶段顺序，不可跳过前置阶段：\n\n"
+            "## 阶段 1：理解（Understand）\n"
+            "目标：确保你已掌握图谱结构和相关枚举值。\n"
+            "- schema context 已在会话开始时自动注入，通常不需要再次调用 get_schema_context。\n"
+            "- 如果问题涉及模糊值（品牌简称、类别别名等），调用 match_value 确认精确值。\n"
+            "- 如果需要浏览某实体某字段的所有可选值，调用 list_domain_values(kind='Entity.field')。\n"
+            "- 如果问题是纯统计/排序/Top N 且不涉及模糊值，可以跳过此阶段。\n\n"
+            "## 阶段 2：查询（Query）\n"
+            "目标：生成正确的 Cypher 并执行。\n"
+            "- 先 validate_cypher，通过后再 execute_cypher。绝不可跳过 validate。\n"
+            f"- 所有 MATCH 节点必须限定 dataset = '{self.dataset_name}'。\n"
+            "- 如果 validate 或 execute 失败，调用 diagnose_error 获取修复建议，然后修正 Cypher 重试。\n"
+            "- 每轮重试都必须重新 validate_cypher。\n\n"
+            "## 阶段 3：呈现（Present）\n"
+            "目标：格式化结果并结束。\n"
+            "- execute_cypher 成功返回 rows 后，调用 format_results（rows 参数将自动填充完整数据，无需手动传入）。\n"
+            "- format_results 成功后，action 设为 finish。\n"
+            "- 没有 rows 时不可 finish。\n\n"
+            "# 禁止行为\n"
+            "- 禁止在没有 schema context 的情况下调用 validate_cypher 或 execute_cypher。\n"
+            "- 禁止跳过 validate_cypher 直接 execute_cypher。\n"
+            "- 禁止在没有成功的 execute_cypher 结果时 finish。\n"
+            "- 禁止连续两次用完全相同的参数调用同一个辅助工具。\n"
+        )
+
+    def _build_user_prompt(
+        self,
+        question: str,
+        messages: list[dict[str, Any]],
+        observations: list[dict[str, Any]],
+        formatted_result: dict[str, Any] | None,
+        tool_specs: list[dict[str, Any]],
+        candidate_domain_matches: list[dict[str, str]],
+        budget: dict[str, Any],
+        current_phase: str,
+        recent_errors: list[dict[str, Any]],
+    ) -> str:
+        sections: list[str] = []
+        transcript = self._messages_for_prompt(messages)
+
+        # Section 1: question + phase
+        sections.append(f"## 当前问题\n{question}")
+        sections.append(f"## 当前阶段\n{current_phase}")
+
+        # Section 2: recent transcript
+        if transcript:
+            sections.append(f"## 会话消息\n{transcript}")
+
+        # Section 3: candidate domain matches (compact)
+        if candidate_domain_matches:
+            match_lines = [
+                f"- {m['entity']}.{m['field']} = \"{m['value']}\""
+                for m in candidate_domain_matches
+            ]
+            sections.append(
+                "## 问题中识别到的枚举值（已确认存在于图谱中）\n" + "\n".join(match_lines)
+            )
+
+        # Section 4: recent errors (only if any)
+        if recent_errors:
+            sections.append(
+                "## 最近错误（必须优先处理）\n"
+                + json.dumps(recent_errors, ensure_ascii=False, indent=2)
+            )
+
+        # Section 5: observation history (compact)
+        if observations:
+            obs_lines: list[str] = []
+            for obs in observations[-6:]:
+                status = obs.get("status", "ok")
+                tool = obs.get("tool_name", "?")
+                result_summary = obs.get("tool_result", {})
+                if isinstance(result_summary, dict):
+                    # Only include key fields to reduce token usage
+                    compact = {k: v for k, v in result_summary.items() if k in ("status", "error", "hint", "row_count", "columns", "rows_preview", "note", "exact_match", "fuzzy_matches", "value")}
+                    if compact:
+                        result_summary = compact
+                obs_lines.append(f"- [{status}] {tool}: {json.dumps(result_summary, ensure_ascii=False)}")
+            sections.append("## 工具执行历史\n" + "\n".join(obs_lines))
+
+        # Section 6: budget + state
+        state_lines = [
+            f"- 辅助工具剩余: {budget.get('aux_remaining', 0)} 次",
+            f"- 主工具剩余: {budget.get('main_remaining', 0)} 次",
+            f"- 已有格式化结果: {'是' if formatted_result is not None else '否'}",
+        ]
+        sections.append("## 当前状态\n" + "\n".join(state_lines))
+
+        # Section 7: available tools
+        sections.append(
+            "## 可用工具\n" + json.dumps(tool_specs, ensure_ascii=False, indent=2)
+        )
+
+        # Section 8: output format
+        sections.append(
+            "## 输出格式\n"
+            "请输出一个 JSON 对象，包含以下字段：\n"
+            '{"thought": "你的推理过程", "action": "call_tool 或 finish", '
+            '"tool_name": "工具名或null", "tool_args": {}, '
+            '"final_answer": "最终回答或null", "auto_finish_after_format": true}'
+        )
+
+        return "\n\n".join(sections)
+
+    @staticmethod
+    def _infer_current_phase(
+        observations: list[dict[str, Any]],
+        formatted_result: dict[str, Any] | None,
+        state: dict[str, Any],
+    ) -> str:
+        """Determine which workflow phase the agent is in based on history."""
+        if formatted_result is not None:
+            return "阶段 3（呈现）— 已有格式化结果，应 finish。"
+        if state.get("_latest_rows") is not None:
+            return "阶段 3（呈现）— 已有查询结果，应调用 format_results。"
+
+        has_successful_execute = any(
+            obs.get("tool_name") == "execute_cypher" and obs.get("status") == "ok"
+            for obs in observations
+        )
+        if has_successful_execute:
+            return "阶段 3（呈现）— 已成功执行查询，应调用 format_results。"
+
+        has_successful_validate = any(
+            obs.get("tool_name") == "validate_cypher" and obs.get("status") == "ok"
+            for obs in observations
+        )
+        if has_successful_validate:
+            return "阶段 2（查询）— 已通过校验，应调用 execute_cypher。"
+
+        has_schema = any(
+            obs.get("tool_name") == "get_schema_context" and obs.get("status") == "ok"
+            for obs in observations
+        )
+        has_any_query_attempt = any(
+            obs.get("tool_name") in ("validate_cypher", "execute_cypher")
+            for obs in observations
+        )
+        if has_schema and not has_any_query_attempt:
+            return "阶段 1→2（理解→查询）— 已有 schema，如需确认枚举值可用 match_value/list_domain_values，否则进入 validate_cypher。"
+
+        if has_any_query_attempt:
+            last_error = None
+            for obs in reversed(observations):
+                if obs.get("status") == "error":
+                    last_error = obs
+                    break
+            if last_error:
+                return "阶段 2（查询）— 上一次查询失败，需要修正 Cypher 后重试（可调用 diagnose_error 获取帮助）。"
+            return "阶段 2（查询）— 正在构建查询。"
+
+        return "阶段 1（理解）— 需要先理解图谱结构，schema 已自动注入，检查是否需要确认枚举值后再构建 Cypher。"
+
+    # ------------------------------------------------------------------
+    # Tool execution
+    # ------------------------------------------------------------------
+
     def _run_tool(
         self,
         thread_id: str,
@@ -384,6 +579,11 @@ class KGQAAgent:
             ],
         }
         messages.append(assistant_tool_message)
+
+        # Auto-supply full rows for format_results from latest execute_cypher
+        # so the LLM's truncated observation doesn't cause data loss.
+        if tool_name == "format_results" and state.get("_latest_rows") is not None:
+            tool_args = {**tool_args, "rows": state["_latest_rows"]}
 
         try:
             tool_result = self.toolbox.invoke(tool_name, tool_args)
@@ -496,15 +696,40 @@ class KGQAAgent:
                 "error": value.get("error"),
                 "hint": self._observation_hint(tool_name, value),
             }
-        if tool_name == "execute_cypher":
-            rows = list(value.get("rows", []))
-            columns = list(rows[0].keys()) if rows else []
+        if tool_name == "list_domain_values":
             return {
                 "status": "ok",
-                "row_count": int(value.get("row_count", len(rows))),
-                "columns": columns,
-                "first_rows": rows[:3],
+                "value": self._summarize_domain_values(value),
             }
+        if tool_name == "match_value":
+            return {
+                "status": "ok",
+                "entity": value.get("entity"),
+                "field": value.get("field"),
+                "keyword": value.get("keyword"),
+                "exact_match": value.get("exact_match"),
+                "fuzzy_matches": list(value.get("fuzzy_matches", []))[:5],
+                "hint": value.get("hint"),
+            }
+        if tool_name == "execute_cypher":
+            rows = list(value.get("rows", []))
+            row_count = int(value.get("row_count", len(rows)))
+            columns = list(rows[0].keys()) if rows else []
+            preview_limit = min(len(rows), 20)
+            result: dict[str, Any] = {
+                "status": "ok",
+                "row_count": row_count,
+                "columns": columns,
+                "rows_preview": rows[:preview_limit],
+            }
+            if row_count > preview_limit:
+                result["note"] = (
+                    f"共 {row_count} 行，此处仅展示前 {preview_limit} 行预览。"
+                    "完整数据已保存，format_results 将自动使用全部数据。"
+                )
+            else:
+                result["note"] = f"共 {row_count} 行（完整数据）。format_results 将自动使用全部数据。"
+            return result
         text = json.dumps(value, ensure_ascii=False)
         if len(text) <= 1200:
             return {"status": "ok", "value": value}
@@ -519,10 +744,10 @@ class KGQAAgent:
         if tool_name == "validate_cypher":
             return "请参考 schema 中的实体、关系和属性名修正查询；必要时可调用 diagnose_error。"
         if tool_name == "list_domain_values":
-            return "如果用户说的是简称、模糊值或别名，可改用 match_value。"
+            return "如果已经拿到完整枚举值，不要重复调用相同的 list_domain_values；下一步应改用 match_value、validate_cypher，或指定更窄的 Entity.field。"
         return None
 
-    def _validate_decision(self, decision: dict[str, Any]) -> dict[str, Any] | None:
+    def _validate_decision(self, decision: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:
         action = str(decision.get("action", "finish"))
         tool_specs = {item["name"]: item for item in self.toolbox.tool_specs()}
         if action not in {"call_tool", "finish"}:
@@ -561,6 +786,19 @@ class KGQAAgent:
                 decision=decision,
                 hint=f"{tool_name} 的参数 schema: {tool_specs[tool_name].get('args_schema', {})}",
             )
+        last_tool_call = self._last_tool_history_item(state)
+        if (
+            tool_name in self.AUX_TOOLS
+            and last_tool_call
+            and str(last_tool_call.get("tool_name", "")) == tool_name
+            and (last_tool_call.get("tool_args") or {}) == tool_args
+        ):
+            return self._decision_error(
+                code="redundant_aux_tool_call",
+                message=f"{tool_name} 与上一轮辅助工具调用完全相同。",
+                decision=decision,
+                hint=self._redundant_aux_tool_hint(tool_name, tool_args),
+            )
         return None
 
     @staticmethod
@@ -586,6 +824,18 @@ class KGQAAgent:
         if hint:
             observation["tool_result"]["hint"] = hint
         return observation
+
+    @staticmethod
+    def _decision_issue_event(issue: dict[str, Any]) -> dict[str, Any]:
+        error_payload = issue.get("tool_result", {}).get("error", {}) if isinstance(issue.get("tool_result"), dict) else {}
+        return {
+            "type": "DECISION_ISSUE",
+            "code": error_payload.get("code"),
+            "message": error_payload.get("message"),
+            "hint": issue.get("tool_result", {}).get("hint") if isinstance(issue.get("tool_result"), dict) else None,
+            "decision": error_payload.get("decision"),
+            "timestamp": time.time(),
+        }
 
     @staticmethod
     def _resolve_tool_status(tool_name: str, tool_result: dict[str, Any]) -> str:
@@ -653,3 +903,63 @@ class KGQAAgent:
         if tool_name in self.MAIN_TOOLS:
             return "主查询预算已耗尽，只能基于现有稳定结果 finish。"
         return "请改用其他仍有预算的工具。"
+
+    @staticmethod
+    def _last_tool_history_item(state: dict[str, Any]) -> dict[str, Any] | None:
+        history = state.get("toolHistory", [])
+        if not isinstance(history, list) or not history:
+            return None
+        last_item = history[-1]
+        return last_item if isinstance(last_item, dict) else None
+
+    @staticmethod
+    def _redundant_aux_tool_hint(tool_name: str, tool_args: dict[str, Any]) -> str:
+        if tool_name == "list_domain_values" and not tool_args:
+            return "已经拿到完整枚举值，请改为指定具体 Entity.field、调用 match_value，或直接进入 validate_cypher。"
+        if tool_name == "get_schema_context":
+            return "最近一轮已经读取过 schema context；除非问题焦点明显变化，否则请直接利用现有 schema 继续推理。"
+        if tool_name == "match_value":
+            return "相同的模糊值匹配刚刚已经执行过，请使用返回的 exact_match/fuzzy_matches 继续构造查询。"
+        if tool_name == "diagnose_error":
+            return "相同错误诊断刚刚已经执行过，请根据 suggestion 修正 Cypher。"
+        return "请避免重复辅助调用，改为利用已有上下文进入主查询链路。"
+
+    @staticmethod
+    def _summarize_domain_values(value: dict[str, Any]) -> dict[str, Any]:
+        summary: dict[str, Any] = {}
+        for entity_name, field_map in value.items():
+            if not isinstance(field_map, dict):
+                continue
+            entity_summary: dict[str, Any] = {}
+            for field_name, field_values in field_map.items():
+                values = list(field_values) if isinstance(field_values, list) else []
+                entity_summary[str(field_name)] = {
+                    "count": len(values),
+                    "sample": values[:5],
+                }
+            summary[str(entity_name)] = entity_summary
+        return summary
+
+    def _candidate_domain_matches(self, question: str, limit: int = 8) -> list[dict[str, str]]:
+        text = question.replace(" ", "").strip()
+        if not text:
+            return []
+        matches: list[dict[str, str]] = []
+        for entity_name, field_map in self.domain.as_dict().items():
+            for field_name, values in field_map.items():
+                for value in values:
+                    value_text = str(value).strip()
+                    if not value_text:
+                        continue
+                    if value_text.replace(" ", "") not in text:
+                        continue
+                    matches.append(
+                        {
+                            "entity": entity_name,
+                            "field": field_name,
+                            "value": value_text,
+                        }
+                    )
+                    if len(matches) >= limit:
+                        return matches
+        return matches

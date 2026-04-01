@@ -46,7 +46,7 @@ def _run_all(
     total = len(all_cases)
     for idx, (group_name, case) in enumerate(all_cases, 1):
         print(f"  ({idx}/{total}) {case['id']}: {case['question'][:40]}...", flush=True)
-        result = run_case(agent, settings, group_name, case)
+        result = run_case(agent, settings, scenario_id, group_name, case)
         status = "PASS" if result["generalization_pass"] else "FAIL"
         latency = result["latency_ms"]
         print(f"           → {status}  {latency}ms", flush=True)
@@ -54,7 +54,7 @@ def _run_all(
     return rows
 
 
-def run_case(agent, settings: Settings, group_name: str, case: dict[str, object]) -> dict[str, object]:
+def run_case(agent, settings: Settings, scenario_id: str, group_name: str, case: dict[str, object]) -> dict[str, object]:
     session_id = f"eval-{case['id']}-{uuid.uuid4()}"
     try:
         started = time.perf_counter()

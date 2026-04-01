@@ -318,13 +318,15 @@ export function humanizeEvent(event: ChatStreamEvent): string {
 export function statusFromEvent(event: ChatStreamEvent): string | null {
   switch (event.type) {
     case "RUN_STARTED":
-      return "正在准备执行";
+      return "正在思考";
     case "STEP_STARTED":
-      return `正在执行 ${String(event.stepName ?? "").replaceAll("_", " ")}`;
+      return "正在思考";
+    case "DECISION_ISSUE":
+      return "正在思考";
     case "TOOL_CALL_START":
-      return `正在调用 ${String(event.toolCallName ?? "工具")}`;
+      return "正在执行";
     case "TEXT_MESSAGE_START":
-      return "正在生成最终回答";
+      return "正在生成回答";
     case "RUN_FINISHED":
       return "已完成";
     case "RUN_ERROR":

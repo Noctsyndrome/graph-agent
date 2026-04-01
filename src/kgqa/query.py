@@ -44,28 +44,28 @@ def inspect_dataset_readiness(
     required_entities: list[str] | None = None,
 ) -> dict[str, Any]:
     executor = Neo4jExecutor(settings)
-    required = required_entities or ["Model", "Project"]
+    schema_entities = [
+        str(entity.get("name", "")).strip()
+        for entity in schema.get("entities", [])
+        if str(entity.get("name", "")).strip()
+    ]
+    required = required_entities or schema_entities[:2]
     counts: dict[str, int] = {
         "__all__": executor.count_dataset_nodes(settings.dataset_name),
     }
     for entity_name in required:
         counts[entity_name] = executor.count_entity_nodes(entity_name)
-    available_entities = {
-        str(entity.get("name", "")).strip()
-        for entity in schema.get("entities", [])
-        if str(entity.get("name", "")).strip()
-    }
     missing_entities = [
         entity_name
         for entity_name in required
-        if entity_name in available_entities and counts.get(entity_name, 0) == 0
+        if entity_name in schema_entities and counts.get(entity_name, 0) == 0
     ]
     ready = counts["__all__"] > 0 and not missing_entities
     return {
         "ready": ready,
         "dataset": settings.dataset_name,
         "counts": counts,
-        "required_entities": [entity_name for entity_name in required if entity_name in available_entities],
+        "required_entities": [entity_name for entity_name in required if entity_name in schema_entities],
         "missing_entities": missing_entities,
     }
 
@@ -177,6 +177,13 @@ class CypherSafetyValidator:
         r"\(\s*(?P<var>[A-Za-z_]\w*)?\s*(?::\s*(?P<label>[A-Za-z_]\w*))?\s*(?:\{(?P<props>[^{}]*)\})?\s*\)"
     )
     _REL_PATTERN = re.compile(r"\[\s*(?:[A-Za-z_]\w*)?\s*:\s*(?P<name>[A-Za-z_]\w*)")
+    _RELATION_TRIPLE_PATTERN = re.compile(
+        r"(?P<left>\(\s*(?P<left_var>[A-Za-z_]\w*)?\s*(?::\s*(?P<left_label>[A-Za-z_]\w*))?\s*(?:\{[^{}]*\})?\s*\))"
+        r"\s*(?P<left_arrow><-|-)\s*"
+        r"\[\s*(?:[A-Za-z_]\w*)?\s*:\s*(?P<name>[A-Za-z_]\w*)(?:\s*\{[^{}]*\})?\s*\]"
+        r"\s*(?P<right_arrow>->|-)\s*"
+        r"(?P<right>\(\s*(?P<right_var>[A-Za-z_]\w*)?\s*(?::\s*(?P<right_label>[A-Za-z_]\w*))?\s*(?:\{[^{}]*\})?\s*\))"
+    )
     _PROPERTY_REF_PATTERN = re.compile(r"\b(?P<var>[A-Za-z_]\w*)\.(?P<prop>[A-Za-z_]\w*)\b")
 
     FORBIDDEN = ("CREATE", "MERGE", "DELETE", "SET", "REMOVE", "CALL DBMS", "DROP", "LOAD CSV")
@@ -296,6 +303,11 @@ class CypherSafetyValidator:
             for relation in self.schema.get("relationships", [])
             if str(relation.get("name", "")).strip()
         }
+        relationship_defs = {
+            str(relation.get("name", "")).strip(): relation
+            for relation in self.schema.get("relationships", [])
+            if str(relation.get("name", "")).strip()
+        }
         variable_labels: dict[str, str] = {}
 
         for node in self._extract_node_patterns(cypher):
@@ -322,6 +334,8 @@ class CypherSafetyValidator:
                     hint=f"当前可用关系: {', '.join(sorted(relationship_names))}。",
                 )
 
+        self._validate_relationship_semantics(cypher, relationship_defs, variable_labels)
+
         for match in self._PROPERTY_REF_PATTERN.finditer(cypher):
             var_name = match.group("var")
             property_name = match.group("prop")
@@ -344,6 +358,53 @@ class CypherSafetyValidator:
                     },
                     hint=suggestion_text,
                 )
+
+    def _validate_relationship_semantics(
+        self,
+        cypher: str,
+        relationship_defs: dict[str, dict[str, Any]],
+        variable_labels: dict[str, str],
+    ) -> None:
+        for match in self._RELATION_TRIPLE_PATTERN.finditer(cypher):
+            relation_name = match.group("name")
+            relation_def = relationship_defs.get(relation_name)
+            if relation_def is None:
+                continue
+
+            left_label = (match.group("left_label") or "").strip() or variable_labels.get((match.group("left_var") or "").strip(), "")
+            right_label = (match.group("right_label") or "").strip() or variable_labels.get((match.group("right_var") or "").strip(), "")
+            if not left_label or not right_label:
+                continue
+
+            left_arrow = match.group("left_arrow")
+            right_arrow = match.group("right_arrow")
+            if left_arrow == "-" and right_arrow == "->":
+                actual_from, actual_to = left_label, right_label
+            elif left_arrow == "<-" and right_arrow == "-":
+                actual_from, actual_to = right_label, left_label
+            else:
+                continue
+
+            expected_from = str(relation_def.get("from", "")).strip()
+            expected_to = str(relation_def.get("to", "")).strip()
+            if actual_from == expected_from and actual_to == expected_to:
+                continue
+
+            raise CypherValidationError(
+                "relationship_semantics_mismatch",
+                f"关系 {relation_name} 的方向或连接实体不符合当前 schema。",
+                details={
+                    "relationship": relation_name,
+                    "expected_from": expected_from,
+                    "expected_to": expected_to,
+                    "actual_from": actual_from,
+                    "actual_to": actual_to,
+                },
+                hint=(
+                    f"当前 schema 中 {relation_name} 的合法方向是 "
+                    f"({expected_from})-[:{relation_name}]->({expected_to})。"
+                ),
+            )
 
     def _validate_property_map_keys(
         self,
@@ -612,10 +673,16 @@ class DomainRegistry:
             entity_name = str(entity.get("name", "")).strip()
             if not entity_name:
                 continue
+            property_types = {
+                str(field_name).strip(): str(field_type).strip().lower()
+                for field_name, field_type in (entity.get("properties", {}) or {}).items()
+                if str(field_name).strip()
+            }
             field_map: dict[str, list[str]] = {}
             for field_name in entity.get("filterable_fields", []):
                 field = str(field_name).strip()
-                if not field or not self._should_load_field(field):
+                field_type = property_types.get(field, "")
+                if not field or not self._should_load_field(field, field_type):
                     continue
                 rows = self._flat(
                     executor,
@@ -631,11 +698,13 @@ class DomainRegistry:
         return [str(row["v"]) for row in executor.query(cypher) if row.get("v")]
 
     @staticmethod
-    def _should_load_field(field_name: str) -> bool:
+    def _should_load_field(field_name: str, field_type: str = "") -> bool:
         normalized = field_name.strip().lower()
         if normalized in {"id", "dataset"}:
             return False
-        return not normalized.endswith("_id")
+        if normalized.endswith("_id"):
+            return False
+        return field_type in {"", "string"}
 
     def as_dict(self) -> dict[str, dict[str, list[str]]]:
         return {

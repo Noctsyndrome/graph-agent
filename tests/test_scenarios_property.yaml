@@ -1,0 +1,149 @@
+baseline:
+  - id: P-B1
+    question: 万象城深圳店有哪些空间？
+    must_include: [空间]
+  - id: P-B2
+    question: 星巴克在哪些项目有门店？
+    must_include: [星巴克, 项目]
+  - id: P-B3
+    question: 月租单价超过 500 元每平米的空间有哪些？
+    must_include: [空间]
+  - id: P-B4
+    question: 万物云管理的项目中，哪些租户是国际一线品牌？
+    must_include: [万物云]
+  - id: P-B5
+    question: 天街杭州店的餐饮类租户有哪些？
+    must_include: [杭州, 餐饮]
+  - id: P-B6
+    question: 各经营公司管理的项目总面积分别是多少？
+    must_include: [经营公司]
+  - id: P-B7
+    question: 哪个项目的空置率最高？
+    must_include: [项目]
+  - id: P-B8
+    question: 各行业租户的平均月租是多少？
+    must_include: [行业]
+  - id: P-B9
+    question: 万物云运营中的购物中心里，月租最低的零售空间是谁在租？
+    must_include: [万物云, 零售]
+  - id: P-B10
+    question: 万物云运营中的购物中心里，月租最低的零售空间合同什么时候到期？
+    must_include: [合同]
+  - id: P-B11
+    question: 逾期付款最多的租户是哪家？
+    must_include: [租户]
+  - id: P-B12
+    question: 逾期付款最多的租户在哪些项目有门店？
+    must_include: [项目]
+  - id: P-B13
+    question: 运营中的写字楼项目有哪些？
+    must_include: [写字楼]
+  - id: P-B14
+    question: 哪些租户属于国际一线品牌？
+    must_include: [国际一线]
+  - id: P-B15
+    question: 已到期的租赁合同有哪些？
+    must_include: [合同]
+  - id: P-B16
+    question: 未付租金的付款记录有哪些？
+    must_include: [未付]
+
+challenge:
+  - id: P-C1
+    question: 帮我看下深圳万象城有哪些铺位
+    must_include: [深圳]
+  - id: P-C2
+    question: 星巴克都进驻了哪些项目？
+    must_include: [星巴克, 项目]
+  - id: P-C3
+    question: 租金单价 500 以上的铺位给我列一下
+    must_include: [空间]
+  - id: P-C4
+    question: 万物云手上的项目里有哪些国际一线商户
+    must_include: [万物云]
+  - id: P-C5
+    question: 杭州天街的餐饮租户都有谁
+    must_include: [杭州, 餐饮]
+  - id: P-C6
+    question: 每家经营公司的项目面积总和是多少
+    must_include: [经营公司]
+  - id: P-C7
+    question: 哪个项目空置最多
+    must_include: [项目]
+  - id: P-C8
+    question: 不同行业商户平均每月交多少租金
+    must_include: [行业]
+  - id: P-C9
+    question: 万物云运营中的购物中心里最便宜的零售铺位是谁租的
+    must_include: [万物云, 零售]
+  - id: P-C10
+    question: 万物云运营中的购物中心里最便宜的零售铺位合同到哪天
+    must_include: [合同]
+  - id: P-C11
+    question: 谁的逾期付款次数最多
+    must_include: [租户]
+  - id: P-C12
+    question: 逾期付款次数最多的租户分布在哪些项目
+    must_include: [项目]
+  - id: P-C13
+    question: 现在还在运营的写字楼项目有哪些
+    must_include: [写字楼]
+  - id: P-C14
+    question: 国际一线品牌租户都有哪些
+    must_include: [国际一线]
+  - id: P-C15
+    question: 到期合同帮我找一下
+    must_include: [合同]
+  - id: P-C16
+    question: 还有哪些款项是没付的
+    must_include: [未付]
+
+generalization:
+  - id: P-G1
+    question: 华润万象生活管理的项目中，哪些租户是国际一线品牌？
+    must_include: [华润万象生活]
+  - id: P-G2
+    question: 龙湖智创生活管理的购物中心有哪些？
+    must_include: [龙湖智创生活, 购物中心]
+  - id: P-G3
+    question: 餐饮类租户主要分布在哪些项目？
+    must_include: [餐饮, 项目]
+  - id: P-G4
+    question: 哪些项目存在逾期付款记录？
+    must_include: [项目]
+  - id: P-G5
+    question: 哪个租户在最多项目开店？
+    must_include: [租户]
+  - id: P-G6
+    question: 哪些空间目前是空置的？
+    must_include: [空间]
+  - id: P-G7
+    question: 各城市在营项目数量分别是多少？
+    must_include: [城市]
+  - id: P-G8
+    question: 哪个经营公司的项目数量最多？
+    must_include: [经营公司]
+  - id: P-G9
+    question: 瑞幸咖啡在哪些项目有门店？
+    must_include: [瑞幸咖啡, 项目]
+  - id: P-G10
+    question: 月租总额最高的合同是哪一份？
+    must_include: [合同]
+  - id: P-G11
+    question: 哪些租户有未付或逾期的租金记录？
+    must_include: [租户]
+  - id: P-G12
+    question: 产业园项目里有哪些办公类租户？
+    must_include: [产业园, 办公]
+  - id: P-G13
+    question: 哪个项目的零售空间最多？
+    must_include: [项目]
+  - id: P-G14
+    question: 合同已终止的租户有哪些？
+    must_include: [租户]
+  - id: P-G15
+    question: 哪些项目目前还没有任何租户入驻？
+    allow_empty: true
+  - id: P-G16
+    question: 有没有母公司集团叫做阿尔法集团的经营公司？
+    allow_empty: true

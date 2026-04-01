@@ -46,6 +46,15 @@ _SCENARIOS: dict[str, ScenarioDefinition] = {
         seed_file=ROOT / "data" / "seed_data_elevator.cypher",
         evaluation_file=ROOT / "tests" / "test_scenarios_elevator.yaml",
     ),
+    "property": ScenarioDefinition(
+        scenario_id="property",
+        label="物业资产经营",
+        description="面向经营项目、空间、租户、合同与付款的异构知识图谱场景。",
+        dataset_name="property_ops",
+        schema_file=ROOT / "data" / "schema_property.yaml",
+        seed_file=ROOT / "data" / "seed_data_property.cypher",
+        evaluation_file=ROOT / "tests" / "test_scenarios_property.yaml",
+    ),
 }
 
 

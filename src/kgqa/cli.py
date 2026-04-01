@@ -12,9 +12,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     seed_parser = subparsers.add_parser("seed-load", help="Load seed data into Neo4j")
-    seed_parser.add_argument("--scenario", default=None, help="Scenario id to load, e.g. hvac or elevator")
+    seed_parser.add_argument("--scenario", default=None, help="Scenario id to load, e.g. hvac, elevator, or property")
     eval_parser = subparsers.add_parser("eval-run", help="Run local evaluation and generate HTML report")
-    eval_parser.add_argument("--scenario", default=None, help="Scenario id to evaluate, e.g. hvac or elevator")
+    eval_parser.add_argument("--scenario", default=None, help="Scenario id to evaluate, e.g. hvac, elevator, or property")
     return parser
 
 
@@ -35,3 +35,7 @@ def main() -> None:
         report = run_evaluation(scenario_id=args.scenario)
         print(f"Evaluation report generated at {report}")
         return
+
+
+if __name__ == "__main__":
+    main()

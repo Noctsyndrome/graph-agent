@@ -5,7 +5,7 @@ import json
 from kgqa.agent import KGQAAgent
 from kgqa.config import get_settings
 from kgqa.models import ChatRequest
-from kgqa.query import DomainRegistry
+from kgqa.query import DomainRegistry, inspect_dataset_readiness
 from kgqa.scenario import build_scenario_settings, get_scenario_definition
 from kgqa.schema import SchemaRegistry
 from kgqa.serializer import ResultSerializer
@@ -49,6 +49,17 @@ def test_validate_cypher_rejects_unknown_schema_property() -> None:
     assert "load_kg" in payload["error"]["hint"]
 
 
+def test_validate_cypher_rejects_wrong_relationship_direction() -> None:
+    toolbox = _build_elevator_toolbox()
+    payload = toolbox.validate_cypher(
+        "MATCH (c:Category {name: '乘客电梯', dataset: 'elevator_poc'})-[:BELONGS_TO]->(m:Model {dataset: 'elevator_poc'}) "
+        "RETURN m.name AS model_name"
+    )
+    assert payload["valid"] is False
+    assert payload["error"]["code"] == "relationship_semantics_mismatch"
+    assert "(Model)-[:BELONGS_TO]->(Category)" in payload["error"]["hint"]
+
+
 def test_validate_cypher_allows_reusing_previously_filtered_variables() -> None:
     toolbox = _build_elevator_toolbox()
     payload = toolbox.validate_cypher(
@@ -56,8 +67,8 @@ def test_validate_cypher_allows_reusing_previously_filtered_variables() -> None:
             "MATCH (m:Model {dataset: 'elevator_poc'})-[:BELONGS_TO]->"
             "(cat:Category {name: '乘客电梯', dataset: 'elevator_poc'}) "
             "MATCH (i:Installation {dataset: 'elevator_poc'})-[:USES_MODEL]->(m) "
-            "MATCH (p:Project {dataset: 'elevator_poc'})<-[:HAS_INSTALLATION]-(i) "
-            "MATCH (c:Customer {dataset: 'elevator_poc'})<-[:OWNS_PROJECT]-(p) "
+            "MATCH (p:Project {dataset: 'elevator_poc'})-[:HAS_INSTALLATION]->(i) "
+            "MATCH (c:Customer {dataset: 'elevator_poc'})-[:OWNS_PROJECT]->(p) "
             "RETURN c.name AS customer, SUM(i.quantity) AS total_quantity "
             "ORDER BY total_quantity DESC LIMIT 10"
         )
@@ -262,7 +273,36 @@ def test_schema_context_can_be_detected_from_session_history() -> None:
     assert agent._has_recent_schema_context(messages) is True
 
 
-def test_schema_context_is_not_forced_before_first_tool(monkeypatch) -> None:
+def test_build_user_prompt_includes_recent_10_message_transcript() -> None:
+    settings = get_settings()
+    scenario = get_scenario_definition("elevator")
+    agent = KGQAAgent(build_scenario_settings(settings, scenario), scenario)
+    messages = [
+        {"id": f"m{index}", "role": "user" if index % 2 == 0 else "assistant", "content": f"message-{index}"}
+        for index in range(12)
+    ]
+
+    prompt = agent._build_user_prompt(
+        question="这些类型分别对应哪些型号",
+        messages=messages,
+        observations=[],
+        formatted_result=None,
+        tool_specs=[],
+        candidate_domain_matches=[],
+        budget={"aux_remaining": 4, "main_remaining": 8},
+        current_phase="阶段 2（查询）",
+        recent_errors=[],
+    )
+
+    assert "## 会话消息" in prompt
+    assert "[user] message-2" in prompt
+    assert "[assistant] message-11" in prompt
+    assert "[user] message-0\n" not in prompt
+    assert "[assistant] message-1\n" not in prompt
+
+
+def test_schema_context_is_auto_injected_before_first_tool(monkeypatch) -> None:
+    """Schema context must be auto-injected as a pre-step on new conversations."""
     settings = get_settings()
     scenario = get_scenario_definition("elevator")
     monkeypatch.setattr("kgqa.agent.DomainRegistry.load", lambda self: None)
@@ -281,6 +321,8 @@ def test_schema_context_is_not_forced_before_first_tool(monkeypatch) -> None:
 
     def _fake_run_tool(thread_id, messages, state, tool_name, tool_args):  # type: ignore[no-untyped-def]
         tool_order.append(tool_name)
+        if tool_name == "get_schema_context":
+            return {"schema_context": "## Schema\n...", "summary": {}}, "ok", messages, state
         if tool_name == "format_results":
             return {"renderer": "table", "payload": [{"count": 1}], "markdown": "| count |\n| --- |\n| 1 |", "row_count": 1, "format": "table", "preview": [{"count": 1}]}, "ok", messages, state
         if tool_name == "execute_cypher":
@@ -312,4 +354,61 @@ def test_schema_context_is_not_forced_before_first_tool(monkeypatch) -> None:
         )
     )
 
-    assert tool_order[0] == "validate_cypher"
+    # Schema context should be auto-injected as the first tool call (pre-step)
+    assert tool_order[0] == "get_schema_context"
+    # LLM-decided tools follow after
+    assert tool_order[1] == "validate_cypher"
+
+
+def test_inspect_dataset_readiness_uses_schema_entity_order(monkeypatch) -> None:
+    settings = get_settings()
+    scenario = get_scenario_definition("property")
+    scenario_settings = build_scenario_settings(settings, scenario)
+    schema = SchemaRegistry(scenario_settings).schema
+
+    monkeypatch.setattr("kgqa.query.Neo4jExecutor.count_dataset_nodes", lambda self, dataset_name: 12)
+
+    def _fake_count_entity_nodes(self, entity_name):  # type: ignore[no-untyped-def]
+        counts = {"OperatingCompany": 2, "OperatingProject": 4}
+        return counts.get(entity_name, 0)
+
+    monkeypatch.setattr("kgqa.query.Neo4jExecutor.count_entity_nodes", _fake_count_entity_nodes)
+
+    readiness = inspect_dataset_readiness(scenario_settings, schema)
+
+    assert readiness["ready"] is True
+    assert readiness["required_entities"] == ["OperatingCompany", "OperatingProject"]
+
+
+def test_validate_decision_rejects_redundant_aux_tool_call(monkeypatch) -> None:
+    settings = get_settings()
+    scenario = get_scenario_definition("property")
+    monkeypatch.setattr("kgqa.agent.DomainRegistry.load", lambda self: None)
+    agent = KGQAAgent(build_scenario_settings(settings, scenario), scenario)
+    state = {
+        "toolHistory": [
+            {
+                "tool_name": "list_domain_values",
+                "tool_args": {},
+                "status": "ok",
+                "tool_result": {"status": "ok"},
+            }
+        ]
+    }
+
+    decision_issue = agent._validate_decision(
+        {"action": "call_tool", "tool_name": "list_domain_values", "tool_args": {}},
+        state,
+    )
+
+    assert decision_issue is not None
+    assert decision_issue["tool_result"]["error"]["code"] == "redundant_aux_tool_call"
+
+
+def test_candidate_domain_matches_detects_named_values() -> None:
+    settings = get_settings()
+    scenario = get_scenario_definition("property")
+    agent = KGQAAgent(build_scenario_settings(settings, scenario), scenario)
+    matches = agent._candidate_domain_matches("星巴克在哪些项目有门店？")
+
+    assert {"entity": "Tenant", "field": "name", "value": "星巴克"} in matches

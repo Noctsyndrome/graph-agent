@@ -849,6 +849,19 @@ button {
   justify-content: center;
 }
 
+.thread-notice-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 18px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-soft) 80%, white 20%);
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
 .thread-empty-copy {
   max-width: 560px;
 }
@@ -1133,6 +1146,19 @@ button {
   gap: 10px;
 }
 
+.thread-composer.is-disabled {
+  opacity: 0.72;
+}
+
+.thread-composer-hint {
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto 10px;
+  padding: 0 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
 .thread-composer-icon,
 .thread-composer-send {
   width: 36px;
@@ -1145,6 +1171,12 @@ button {
   justify-content: center;
   color: var(--text-muted);
   flex: 0 0 auto;
+}
+
+.thread-composer-icon:disabled,
+.thread-composer-send:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .thread-composer-send {
@@ -1166,6 +1198,11 @@ button {
 
 .thread-composer-input::placeholder {
   color: var(--text-soft);
+}
+
+.thread-composer-input:disabled {
+  cursor: not-allowed;
+  color: var(--text-muted);
 }
 
 .spin {

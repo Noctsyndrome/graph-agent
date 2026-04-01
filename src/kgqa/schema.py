@@ -134,7 +134,4 @@ class SchemaRegistry:
         for part in re.split(r"[·/、\s]", base):
             if part:
                 tokens.add(part)
-        suffix_match = re.search(r"(客户|项目|城市|区域|品牌|型号|参数|安装|类型|类别)$", base)
-        if suffix_match:
-            tokens.add(suffix_match.group(1))
         return {token for token in tokens if token}
