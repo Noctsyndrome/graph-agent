@@ -404,7 +404,8 @@ class KGQAAgent:
             "## 阶段 2：查询（Query）\n"
             "目标：生成正确的 Cypher 并执行。\n"
             "- 先 validate_cypher，通过后再 execute_cypher。绝不可跳过 validate。\n"
-            f"- 所有 MATCH 节点必须限定 dataset = '{self.dataset_name}'。\n"
+            f"- **关键规则**：所有 MATCH 子句中的每个节点都必须内联限定 `{{dataset: '{self.dataset_name}'}}`，例如:\n"
+            f"  `MATCH (n:Entity {{dataset: '{self.dataset_name}'}})` — 不带 dataset 的 MATCH 会被 validate 拒绝。\n"
             "- 如果 validate 或 execute 失败，调用 diagnose_error 获取修复建议，然后修正 Cypher 重试。\n"
             "- 每轮重试都必须重新 validate_cypher。\n\n"
             "## 阶段 3：呈现（Present）\n"
@@ -487,7 +488,18 @@ class KGQAAgent:
             "## 可用工具\n" + json.dumps(tool_specs, ensure_ascii=False, indent=2)
         )
 
-        # Section 8: output format
+        # Section 8: Cypher writing reminder (inject when entering query phase)
+        if "查询" in current_phase or "validate" in current_phase.lower():
+            sections.append(
+                "## Cypher 编写提醒（重要）\n"
+                f"生成 Cypher 时，每个 MATCH 子句中的节点都必须添加 dataset 过滤：\n"
+                f"  正确: MATCH (n:Entity {{dataset: '{self.dataset_name}'}}) ...\n"
+                f"  错误: MATCH (n:Entity) WHERE n.dataset = '{self.dataset_name}' （放在 WHERE 中也可以，但内联写法更不容易遗漏）\n"
+                f"  错误: MATCH (n:Entity) ... （缺少 dataset 限定，validate_cypher 会拒绝）\n"
+                "如果有多个 MATCH 子句，每个节点都必须单独限定 dataset。"
+            )
+
+        # Section 9: output format
         sections.append(
             "## 输出格式\n"
             "请输出一个 JSON 对象，包含以下字段：\n"
