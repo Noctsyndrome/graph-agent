@@ -439,9 +439,11 @@ class KGQAAgent:
         sections.append(f"## 当前问题\n{question}")
         sections.append(f"## 当前阶段\n{current_phase}")
 
-        # Section 2: recent transcript
+        # Section 2: recent transcript (Q&A pairs only, no tool noise)
         if transcript:
-            sections.append(f"## 会话消息\n{transcript}")
+            sections.append(
+                "## 对话历史（追问时必须延续前文的查询范围和约束条件）\n" + transcript
+            )
 
         # Section 3: candidate domain matches (compact)
         if candidate_domain_matches:
@@ -674,14 +676,26 @@ class KGQAAgent:
 
     @staticmethod
     def _messages_for_prompt(messages: list[dict[str, Any]]) -> str:
-        lines: list[str] = []
-        for message in messages[-10:]:
+        """Extract user questions and assistant final answers, skipping tool
+        call / tool result noise so the context window covers more turns."""
+        qa_lines: list[str] = []
+        for message in messages:
             role = str(message.get("role", "unknown"))
+            if role == "tool":
+                continue
+            if role == "assistant" and message.get("toolCalls"):
+                continue
             content = message.get("content", "")
             if isinstance(content, list):
-                content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
-            lines.append(f"[{role}] {content}")
-        return "\n".join(lines)
+                content = "".join(
+                    str(part.get("text", "")) for part in content if isinstance(part, dict)
+                )
+            content = str(content).strip()
+            if not content:
+                continue
+            qa_lines.append(f"[{role}] {content}")
+        # Last 10 Q&A entries ≈ 5 full conversation turns
+        return "\n".join(qa_lines[-10:])
 
     @staticmethod
     def _has_recent_schema_context(messages: list[dict[str, Any]], max_messages: int = 24) -> bool:

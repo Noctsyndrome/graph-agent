@@ -14,7 +14,7 @@ from kgqa.models import ChatRequest
 from kgqa.query import Neo4jExecutor, close_all_neo4j_drivers, load_seed_data
 from kgqa.scenario import get_scenario_definition, list_scenarios
 from kgqa.schema import SchemaRegistry
-from kgqa.session import clear_sessions, get_session, get_session_payload, list_sessions
+from kgqa.session import clear_sessions, close_session_db, delete_session, get_session, get_session_payload, list_sessions
 
 settings = get_settings()
 app = FastAPI(title="kg-qa-poc", version="0.1.0")
@@ -95,7 +95,7 @@ def startup_event() -> None:
 
 @app.on_event("shutdown")
 def shutdown_event() -> None:
-    clear_sessions()
+    close_session_db()
     close_all_kgqa_agents()
     close_all_llm_clients()
     close_all_neo4j_drivers()
@@ -175,6 +175,14 @@ def chat_session_messages(session_id: str) -> dict[str, object]:
     if payload is None:
         raise HTTPException(status_code=404, detail="Chat session not found.")
     return payload.model_dump()
+
+
+@app.delete("/chat/{session_id}")
+def chat_delete_session(session_id: str) -> dict[str, str]:
+    deleted = delete_session(session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+    return {"status": "deleted", "session_id": session_id}
 
 
 @app.post("/chat")

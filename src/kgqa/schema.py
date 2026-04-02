@@ -51,7 +51,11 @@ class SchemaRegistry:
         for relation in self._schema["relationships"]:
             if focus and relation["from"] not in focus and relation["to"] not in focus:
                 continue
-            lines.append(f"- ({relation['from']})-[:{relation['name']}]->({relation['to']})")
+            line = f"- ({relation['from']})-[:{relation['name']}]->({relation['to']})"
+            desc = str(relation.get("description", "")).strip()
+            if desc:
+                line += f"  — {desc}"
+            lines.append(line)
         paths = self._schema.get("paths", {})
         if paths:
             lines.append("")

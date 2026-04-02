@@ -33,21 +33,21 @@ class ResultSerializer:
 
         normalized_rows = self._normalize_rows(rows)
         preview = normalized_rows[:10]
-        headers = list(preview[0].keys()) if preview else []
+        headers = list(normalized_rows[0].keys()) if normalized_rows else []
 
         if self._is_key_value_result(normalized_rows):
             markdown = self._as_key_value(normalized_rows[0])
             return SerializedResult(format="key_value", markdown=markdown, preview=preview, row_count=len(normalized_rows))
 
         if self._has_sequence_values(normalized_rows):
-            markdown = self._as_grouped_list(preview)
+            markdown = self._as_grouped_list(normalized_rows)
             return SerializedResult(format="numbered_list", markdown=markdown, preview=preview, row_count=len(normalized_rows))
 
         if self._looks_like_aggregation(headers):
-            markdown = self._as_table(preview)
+            markdown = self._as_table(normalized_rows)
             return SerializedResult(format="markdown_table", markdown=markdown, preview=preview, row_count=len(normalized_rows))
 
-        markdown = self._as_table(preview)
+        markdown = self._as_table(normalized_rows)
         return SerializedResult(format="table", markdown=markdown, preview=preview, row_count=len(normalized_rows))
 
     def _normalize_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

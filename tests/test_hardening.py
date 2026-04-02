@@ -294,7 +294,7 @@ def test_build_user_prompt_includes_recent_10_message_transcript() -> None:
         recent_errors=[],
     )
 
-    assert "## 会话消息" in prompt
+    assert "## 对话历史" in prompt
     assert "[user] message-2" in prompt
     assert "[assistant] message-11" in prompt
     assert "[user] message-0\n" not in prompt

@@ -9,6 +9,7 @@ import {
   Plus,
   Server,
   Sparkles,
+  Trash2,
   Wrench,
 } from "lucide-react";
 import type { AppendMessage } from "@assistant-ui/react";
@@ -28,6 +29,7 @@ import {
   fetchLlmStatus,
   fetchSchemaSummary,
   fetchScenarios,
+  deleteSession,
   fetchSessionPayload,
   fetchSessions,
   streamChat,
@@ -90,10 +92,6 @@ function sessionTitleFromPayload(payload: ChatSessionPayload): string {
     return userMessage.content.trim().slice(0, 32);
   }
   return payload.scenario_label ? `${payload.scenario_label}会话` : "新会话";
-}
-
-function countVisibleMessages(messages: BackendChatMessage[]): number {
-  return messages.filter((item) => item.role === "user" || item.role === "assistant").length;
 }
 
 function hashString(value: string): number {
@@ -417,6 +415,30 @@ export default function App() {
     setScenarioPickerOpen(true);
   }, []);
 
+  const resetCurrentSession = useCallback(
+    async (scenarioId?: string) => {
+      const scenario = scenarios.find((item) => item.id === scenarioId) ?? null;
+      const sessionId = crypto.randomUUID();
+      setCurrentSessionId(sessionId);
+      setSessionPayload(createEmptySession(sessionId, scenario));
+      setRawMessages([]);
+      setThreadState({});
+      setSelectedToolCall(null);
+      setStatusText("准备就绪");
+      setIsRunning(false);
+      setGlobalError(null);
+      if (scenario?.id) {
+        await refreshScenarioMeta(scenario.id);
+        setScenarioPickerOpen(false);
+      } else {
+        setSchemaSummary(null);
+        setExampleGroups([]);
+        setScenarioPickerOpen(true);
+      }
+    },
+    [refreshScenarioMeta, scenarios],
+  );
+
   useEffect(() => {
     void (async () => {
       await refreshMeta();
@@ -435,7 +457,6 @@ export default function App() {
 
   const threadMessages = useMemo(() => rawMessagesToThreadMessages(rawMessages), [rawMessages]);
   const currentTitle = sessionTitleFromPayload(sessionPayload);
-  const visibleMessageCount = countVisibleMessages(rawMessages);
   const suggestionCards = useMemo(
     () => pickSuggestionPool(exampleGroups, `${currentSessionId}:${sessionPayload.scenario_id}:all-examples`),
     [currentSessionId, exampleGroups, sessionPayload.scenario_id],
@@ -529,6 +550,39 @@ export default function App() {
     [runQuestion],
   );
 
+  const handleDeleteSession = useCallback(
+    async (sessionId: string) => {
+      if (isRunning && sessionId === currentSessionId) {
+        setGlobalError("当前会话正在执行，暂时不能删除。");
+        return;
+      }
+      const target = sessions.find((item) => item.session_id === sessionId);
+      const label = target?.title ?? "该会话";
+      if (!window.confirm(`确认删除会话“${label}”吗？`)) {
+        return;
+      }
+
+      setGlobalError(null);
+      try {
+        await deleteSession(sessionId);
+        const nextSessions = await fetchSessions();
+        setSessions(nextSessions);
+
+        if (sessionId !== currentSessionId) {
+          return;
+        }
+        if (nextSessions.length > 0) {
+          await hydrateSession(nextSessions[0].session_id, false);
+          return;
+        }
+        await resetCurrentSession(sessionPayload.scenario_id || undefined);
+      } catch (error) {
+        setGlobalError(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [currentSessionId, hydrateSession, isRunning, resetCurrentSession, sessionPayload.scenario_id, sessions],
+  );
+
   const sidebarSessions = useMemo(() => {
     if (sessions.some((session) => session.session_id === currentSessionId)) {
       return sessions;
@@ -542,12 +596,12 @@ export default function App() {
         dataset_name: sessionPayload.dataset_name,
         created_at: sessionPayload.created_at,
         updated_at: sessionPayload.updated_at,
-        message_count: visibleMessageCount,
+        message_count: 0,
         status: sessionPayload.status,
       },
       ...sessions,
     ];
-  }, [currentSessionId, currentTitle, sessionPayload, sessions, visibleMessageCount]);
+  }, [currentSessionId, currentTitle, sessionPayload, sessions]);
 
   const graphSummary = schemaSummary
     ? `${schemaSummary.entity_count} 实体 / ${schemaSummary.relationship_count} 关系`
@@ -595,22 +649,42 @@ export default function App() {
           <ScrollArea.Viewport className="sidebar-scroll-viewport">
             <div className="session-list">
               {sidebarSessions.map((session) => (
-                <button
+                <div
                   key={session.session_id}
                   className={`session-card ${session.session_id === currentSessionId ? "active" : ""}`}
-                  onClick={() => void hydrateSession(session.session_id)}
                 >
-                  <div className="session-card-title">{session.title}</div>
-                  {session.scenario_label ? (
-                    <div className="session-card-badges">
-                      <span className="session-badge">{session.scenario_label}</span>
+                  <button
+                    type="button"
+                    className="session-card-main"
+                    onClick={() => void hydrateSession(session.session_id)}
+                  >
+                    <div className="session-card-header">
+                      <div className="session-card-title">{session.title}</div>
                     </div>
-                  ) : null}
-                  <div className="session-card-meta">
-                    <span>{session.message_count} 条消息</span>
-                    <span>{formatTimestamp(session.updated_at)}</span>
-                  </div>
-                </button>
+                    <div className="session-card-meta">
+                      {session.scenario_label ? (
+                        <div className="session-card-badges">
+                          <span className="session-badge">{session.scenario_label}</span>
+                        </div>
+                      ) : (
+                        <div />
+                      )}
+                      <span>{formatTimestamp(session.updated_at)}</span>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    className="session-card-delete"
+                    aria-label={`删除会话 ${session.title}`}
+                    title="删除会话"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void handleDeleteSession(session.session_id);
+                    }}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
               ))}
             </div>
           </ScrollArea.Viewport>

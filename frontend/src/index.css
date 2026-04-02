@@ -150,11 +150,16 @@ button {
 }
 
 .session-card {
-  display: block;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  align-items: start;
+  column-gap: 8px;
+  row-gap: 6px;
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  padding: 12px 14px;
+  padding: 8px 10px;
   border: 1px solid transparent;
   border-radius: 16px;
   background: transparent;
@@ -173,6 +178,24 @@ button {
   box-shadow: var(--shadow-soft);
 }
 
+.session-card-main {
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.session-card-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 28px;
+  align-items: center;
+  gap: 8px;
+}
+
 .session-card-title {
   display: -webkit-box;
   width: 100%;
@@ -181,6 +204,7 @@ button {
   font-size: 14px;
   font-weight: 600;
   line-height: 1.5;
+  padding-block: 3px;
   -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
@@ -188,7 +212,6 @@ button {
 }
 
 .session-card-badges {
-  margin-top: 8px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -207,7 +230,7 @@ button {
 }
 
 .session-card-meta {
-  margin-top: 8px;
+  margin-top: 6px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -218,16 +241,38 @@ button {
   width: 100%;
 }
 
-.session-card-meta span:first-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .session-card-meta span:last-child {
   flex: 0 0 auto;
   white-space: nowrap;
+}
+
+.session-card-delete {
+  width: 28px;
+  height: 28px;
+  grid-column: 2;
+  grid-row: 1;
+  align-self: start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-soft);
+  opacity: 0;
+  pointer-events: none;
+  transition: background 140ms ease, color 140ms ease, opacity 140ms ease;
+}
+
+.session-card:hover .session-card-delete,
+.session-card:focus-within .session-card-delete {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.session-card-delete:hover {
+  background: rgba(239, 68, 68, 0.08);
+  color: #dc2626;
 }
 
 .sidebar-footer {

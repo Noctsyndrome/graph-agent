@@ -92,6 +92,7 @@ relationships:
     to: Space
     cardinality: N:1
     direction: out
+    description: 合同对应的具体铺位。当查询某项目/铺位下的合同时，必须通过此关系回连 Space 节点以限定范围，否则会返回该租户在所有项目的全部合同。
   - name: HAS_PAYMENT
     from: Lease
     to: Payment
@@ -138,13 +139,3 @@ column_aliases:
   月租单价:
     zh: [租金单价]
     en: [monthly_rent_yuan]
-few_shot_scoring:
-  entity_description_weight: 1
-  column_alias_weight: 2
-  domain_value_weight: 3
-  relationship_weight: 2
-answer_formats:
-  property_query: key_value
-  compare_query: markdown_table
-  list_query: numbered_list
-  aggregation_query: ranking_table

@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     seed_file: Path = ROOT / "data" / "seed_data.cypher"
     evaluation_file: Path = ROOT / "tests" / "test_scenarios.yaml"
     report_file: Path = ROOT / "eval" / "report.html"
+    session_db_path: Path = ROOT / "data" / "sessions.db"
 
     @property
     def has_llm(self) -> bool:

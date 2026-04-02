@@ -118,14 +118,4 @@ column_aliases:
   制冷量:
     zh: []
     en: [cooling_kw]
-few_shot_scoring:
-  entity_description_weight: 1
-  column_alias_weight: 2
-  domain_value_weight: 3
-  relationship_weight: 2
-answer_formats:
-  property_query: key_value
-  compare_query: markdown_table
-  list_query: numbered_list
-  aggregation_query: ranking_table
 

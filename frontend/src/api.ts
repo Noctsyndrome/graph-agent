@@ -49,6 +49,13 @@ export function fetchSessionPayload(sessionId: string): Promise<ChatSessionPaylo
   return readJson<ChatSessionPayload>(`/chat/${sessionId}/messages`);
 }
 
+export async function deleteSession(sessionId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/chat/${sessionId}`, { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(`Delete session failed: ${response.status}`);
+  }
+}
+
 export async function streamChat(
   sessionId: string,
   messages: BackendChatMessage[],

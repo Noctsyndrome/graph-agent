@@ -15,3 +15,7 @@ eval/report.html
 frontend/node_modules/
 frontend/dist/
 logs/*.tgz
+data/sessions.db
+data/sessions.db-wal
+data/sessions.db-shm
+data/test-sessions/
