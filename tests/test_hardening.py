@@ -9,6 +9,7 @@ from kgqa.query import DomainRegistry, inspect_dataset_readiness
 from kgqa.scenario import build_scenario_settings, get_scenario_definition
 from kgqa.schema import SchemaRegistry
 from kgqa.serializer import ResultSerializer
+from kgqa.session import get_session_payload
 from kgqa.tools import KGQAToolbox
 
 
@@ -119,6 +120,30 @@ def test_schema_focus_expands_to_neighbor_entities() -> None:
 
     assert "- Installation:" in rendered
     assert "- Project:" in rendered
+
+
+def test_schema_graph_data_and_active_types() -> None:
+    settings = get_settings()
+    scenario = get_scenario_definition("property")
+    scenario_settings = build_scenario_settings(settings, scenario)
+    registry = SchemaRegistry(scenario_settings)
+
+    graph = registry.graph_data()
+    active_types = registry.extract_active_types(
+        (
+            "MATCH (p:OperatingProject {dataset: 'property_ops'})-[:HAS_SPACE]->"
+            "(s:Space {dataset: 'property_ops'}) "
+            "RETURN p.name AS project_name, s.name AS space_name"
+        )
+    )
+
+    assert graph["dataset"] == "property_ops"
+    assert len(graph["nodes"]) == 6
+    assert len(graph["links"]) == 6
+    assert active_types == {
+        "entities": ["OperatingProject", "Space"],
+        "relationships": ["HAS_SPACE"],
+    }
 
 
 def test_agent_returns_scenario_not_loaded_before_loop(monkeypatch) -> None:
@@ -358,6 +383,111 @@ def test_schema_context_is_auto_injected_before_first_tool(monkeypatch) -> None:
     assert tool_order[0] == "get_schema_context"
     # LLM-decided tools follow after
     assert tool_order[1] == "validate_cypher"
+
+
+def test_execute_cypher_graph_delta_is_persisted_and_emitted(monkeypatch) -> None:
+    settings = get_settings()
+    scenario = get_scenario_definition("property")
+    monkeypatch.setattr("kgqa.agent.DomainRegistry.load", lambda self: None)
+    monkeypatch.setattr(
+        "kgqa.agent.inspect_dataset_readiness",
+        lambda settings, schema: {
+            "ready": True,
+            "dataset": "property_ops",
+            "counts": {"__all__": 1, "OperatingProject": 1, "Space": 1},
+            "required_entities": ["OperatingProject", "Space"],
+            "missing_entities": [],
+        },
+    )
+    agent = KGQAAgent(build_scenario_settings(settings, scenario), scenario)
+    decisions = iter(
+        [
+            {
+                "action": "call_tool",
+                "tool_name": "validate_cypher",
+                "tool_args": {
+                    "cypher": (
+                        "MATCH (p:OperatingProject {dataset: 'property_ops'})-[:HAS_SPACE]->"
+                        "(s:Space {dataset: 'property_ops'}) "
+                        "RETURN p.name AS project_name, s.name AS space_name"
+                    )
+                },
+                "auto_finish_after_format": False,
+            },
+            {
+                "action": "call_tool",
+                "tool_name": "execute_cypher",
+                "tool_args": {
+                    "cypher": (
+                        "MATCH (p:OperatingProject {dataset: 'property_ops'})-[:HAS_SPACE]->"
+                        "(s:Space {dataset: 'property_ops'}) "
+                        "RETURN p.name AS project_name, s.name AS space_name"
+                    )
+                },
+                "auto_finish_after_format": False,
+            },
+            {
+                "action": "call_tool",
+                "tool_name": "format_results",
+                "tool_args": {
+                    "question": "深圳万象城有哪些铺位？",
+                    "rows": [{"project_name": "深圳万象城", "space_name": "L1-001"}],
+                },
+                "auto_finish_after_format": True,
+            },
+        ]
+    )
+
+    def _fake_invoke(tool_name, tool_args):  # type: ignore[no-untyped-def]
+        if tool_name == "get_schema_context":
+            return {"schema_context": "## Schema\n...", "summary": {"dataset": "property_ops"}}
+        if tool_name == "validate_cypher":
+            return {"status": "ok", "valid": True, "cypher": tool_args["cypher"]}
+        if tool_name == "execute_cypher":
+            return {
+                "status": "ok",
+                "row_count": 1,
+                "rows": [{"project_name": "深圳万象城", "space_name": "L1-001"}],
+            }
+        if tool_name == "format_results":
+            return {
+                "renderer": "table",
+                "payload": [{"project_name": "深圳万象城", "space_name": "L1-001"}],
+                "markdown": "| project_name | space_name |\n| --- | --- |\n| 深圳万象城 | L1-001 |",
+                "row_count": 1,
+                "format": "table",
+                "preview": [{"project_name": "深圳万象城", "space_name": "L1-001"}],
+            }
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    monkeypatch.setattr(agent, "_decide_next_action", lambda *args, **kwargs: next(decisions))
+    monkeypatch.setattr(agent.toolbox, "invoke", _fake_invoke)
+    monkeypatch.setattr(agent.toolbox, "compose_answer", lambda question, formatted_result: "done")
+
+    events = list(
+        agent.stream_chat(
+            ChatRequest(
+                threadId="graph-delta-session",
+                scenarioId="property",
+                messages=[{"id": "u1", "role": "user", "content": "深圳万象城有哪些铺位？"}],
+                state={},
+            )
+        )
+    )
+    payloads = [json.loads(event.removeprefix("data: ").strip()) for event in events]
+    session_payload = get_session_payload("graph-delta-session")
+
+    assert session_payload is not None
+    execute_item = next(item for item in session_payload.state["toolHistory"] if item["tool_name"] == "execute_cypher")
+    assert execute_item["graph_delta"]["active_types"] == {
+        "entities": ["OperatingProject", "Space"],
+        "relationships": ["HAS_SPACE"],
+    }
+    custom_event = next(item for item in payloads if item["type"] == "CUSTOM")
+    assert custom_event["graph_delta"]["active_types"] == {
+        "entities": ["OperatingProject", "Space"],
+        "relationships": ["HAS_SPACE"],
+    }
 
 
 def test_inspect_dataset_readiness_uses_schema_entity_order(monkeypatch) -> None:

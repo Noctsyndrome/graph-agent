@@ -12,7 +12,7 @@ from kgqa.config import get_settings
 from kgqa.llm import LLMClient, close_all_llm_clients
 from kgqa.models import ChatRequest
 from kgqa.query import Neo4jExecutor, close_all_neo4j_drivers, load_seed_data
-from kgqa.scenario import get_scenario_definition, list_scenarios
+from kgqa.scenario import build_scenario_settings, get_scenario_definition, list_scenarios
 from kgqa.schema import SchemaRegistry
 from kgqa.session import clear_sessions, close_session_db, delete_session, get_session, get_session_payload, list_sessions
 
@@ -125,15 +125,15 @@ def scenarios() -> list[dict[str, str]]:
 @app.get("/schema")
 def schema_summary(scenario_id: str | None = None) -> dict[str, object]:
     scenario = _resolve_scenario(scenario_id)
-    scenario_settings = settings.model_copy(
-        update={
-            "dataset_name": scenario.dataset_name,
-            "schema_file": scenario.schema_file,
-            "seed_file": scenario.seed_file,
-            "evaluation_file": scenario.evaluation_file,
-        }
-    )
+    scenario_settings = build_scenario_settings(settings, scenario)
     return SchemaRegistry(scenario_settings, domain=get_kgqa_agent(settings, scenario).domain).summary()
+
+
+@app.get("/schema/graph")
+def schema_graph(scenario_id: str | None = None) -> dict[str, object]:
+    scenario = _resolve_scenario(scenario_id)
+    scenario_settings = build_scenario_settings(settings, scenario)
+    return SchemaRegistry(scenario_settings, domain=get_kgqa_agent(settings, scenario).domain).graph_data()
 
 
 @app.get("/examples")
@@ -145,14 +145,7 @@ def examples(scenario_id: str | None = None) -> dict[str, object]:
 @app.post("/seed/load")
 def seed_load(scenario_id: str | None = None) -> dict[str, str]:
     scenario = _resolve_scenario(scenario_id)
-    scenario_settings = settings.model_copy(
-        update={
-            "dataset_name": scenario.dataset_name,
-            "schema_file": scenario.schema_file,
-            "seed_file": scenario.seed_file,
-            "evaluation_file": scenario.evaluation_file,
-        }
-    )
+    scenario_settings = build_scenario_settings(settings, scenario)
     try:
         load_seed_data(scenario_settings)
     except Exception as exc:

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as ScrollArea from "@radix-ui/react-scroll-area";
 import {
@@ -6,6 +6,8 @@ import {
   ChevronLeft,
   Database,
   GitBranch,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Server,
   Sparkles,
@@ -27,6 +29,7 @@ import {
   fetchExampleGroups,
   fetchHealth,
   fetchLlmStatus,
+  fetchSchemaGraph,
   fetchSchemaSummary,
   fetchScenarios,
   deleteSession,
@@ -34,15 +37,18 @@ import {
   fetchSessions,
   streamChat,
 } from "./api";
+import { SchemaGraphView } from "./components/schema-graph-view";
 import type {
   BackendChatMessage,
   ChatStreamEvent,
   ChatSessionPayload,
   ChatSessionSummary,
   ExampleGroup,
+  GraphActiveTypes,
   HealthPayload,
   LlmStatusPayload,
   ScenarioSummary,
+  SchemaGraphData,
   SchemaSummaryPayload,
 } from "./types";
 
@@ -59,6 +65,75 @@ function createEmptySession(sessionId: string, scenario: ScenarioSummary | null 
     messages: [],
     state: {},
     status: "idle",
+  };
+}
+
+type LayoutStyleVars = CSSProperties & {
+  "--sidebar-width"?: string;
+  "--graph-panel-width"?: string;
+};
+
+function emptyActiveGraphTypes(): GraphActiveTypes {
+  return {
+    entities: [],
+    relationships: [],
+  };
+}
+
+function extractActiveGraphTypes(state: Record<string, unknown>): GraphActiveTypes {
+  const toolHistory = state.toolHistory;
+  if (!Array.isArray(toolHistory)) {
+    return emptyActiveGraphTypes();
+  }
+  for (let index = toolHistory.length - 1; index >= 0; index -= 1) {
+    const item = toolHistory[index];
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const graphDelta = (item as { graph_delta?: unknown }).graph_delta;
+    if (!graphDelta || typeof graphDelta !== "object") {
+      continue;
+    }
+    const activeTypes = (graphDelta as { active_types?: unknown }).active_types;
+    if (!activeTypes || typeof activeTypes !== "object") {
+      continue;
+    }
+    return {
+      entities: Array.isArray((activeTypes as { entities?: unknown }).entities)
+        ? ((activeTypes as { entities: unknown[] }).entities.filter(
+            (value): value is string => typeof value === "string",
+          ) as string[])
+        : [],
+      relationships: Array.isArray((activeTypes as { relationships?: unknown }).relationships)
+        ? ((activeTypes as { relationships: unknown[] }).relationships.filter(
+            (value): value is string => typeof value === "string",
+          ) as string[])
+        : [],
+    };
+  }
+  return emptyActiveGraphTypes();
+}
+
+function extractEventActiveGraphTypes(event: ChatStreamEvent): GraphActiveTypes | null {
+  const graphDelta = event.graph_delta;
+  if (!graphDelta || typeof graphDelta !== "object") {
+    return null;
+  }
+  const activeTypes = (graphDelta as { active_types?: unknown }).active_types;
+  if (!activeTypes || typeof activeTypes !== "object") {
+    return null;
+  }
+  return {
+    entities: Array.isArray((activeTypes as { entities?: unknown }).entities)
+      ? ((activeTypes as { entities: unknown[] }).entities.filter(
+          (value): value is string => typeof value === "string",
+        ) as string[])
+      : [],
+    relationships: Array.isArray((activeTypes as { relationships?: unknown }).relationships)
+      ? ((activeTypes as { relationships: unknown[] }).relationships.filter(
+          (value): value is string => typeof value === "string",
+        ) as string[])
+      : [],
   };
 }
 
@@ -290,10 +365,13 @@ function ScenarioPickerDialog({
 }
 
 export default function App() {
+  const GRAPH_PANEL_MIN_WIDTH = 320;
+  const THREAD_PANEL_MIN_WIDTH = 620;
   const initialSessionId = useRef(crypto.randomUUID()).current;
   const [health, setHealth] = useState<HealthPayload | null>(null);
   const [llmStatus, setLlmStatus] = useState<LlmStatusPayload | null>(null);
   const [schemaSummary, setSchemaSummary] = useState<SchemaSummaryPayload | null>(null);
+  const [schemaGraph, setSchemaGraph] = useState<SchemaGraphData | null>(null);
   const [exampleGroups, setExampleGroups] = useState<ExampleGroup[]>([]);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
@@ -305,6 +383,12 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [statusText, setStatusText] = useState("准备就绪");
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [graphSidebarOpen, setGraphSidebarOpen] = useState(false);
+  const [graphPanelWidth, setGraphPanelWidth] = useState(GRAPH_PANEL_MIN_WIDTH);
+  const [graphFitRequestKey, setGraphFitRequestKey] = useState(0);
+  const [isResizingGraphPanel, setIsResizingGraphPanel] = useState(false);
+  const [activeGraphTypes, setActiveGraphTypes] = useState<GraphActiveTypes>(emptyActiveGraphTypes);
   const [scenarioPickerOpen, setScenarioPickerOpen] = useState(false);
   const [loadingState, setLoadingState] = useState("正在加载系统状态");
   const [globalError, setGlobalError] = useState<string | null>(null);
@@ -312,6 +396,7 @@ export default function App() {
   const currentSessionIdRef = useRef(currentSessionId);
   const rawMessagesRef = useRef(rawMessages);
   const threadStateRef = useRef(threadState);
+  const workspaceBodyRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
@@ -325,17 +410,32 @@ export default function App() {
     threadStateRef.current = threadState;
   }, [threadState]);
 
+  const clampGraphPanelWidth = useCallback((nextWidth: number) => {
+    const containerWidth = workspaceBodyRef.current?.getBoundingClientRect().width ?? 0;
+    const maxWidth = containerWidth
+      ? Math.max(
+          GRAPH_PANEL_MIN_WIDTH,
+          Math.min(Math.floor((containerWidth - 12) / 2), containerWidth - THREAD_PANEL_MIN_WIDTH - 12),
+        )
+      : GRAPH_PANEL_MIN_WIDTH;
+    return Math.max(GRAPH_PANEL_MIN_WIDTH, Math.min(nextWidth, maxWidth));
+  }, []);
+
   const refreshScenarioMeta = useCallback(async (scenarioId: string) => {
     if (!scenarioId) {
       setSchemaSummary(null);
+      setSchemaGraph(null);
       setExampleGroups([]);
+      setActiveGraphTypes(emptyActiveGraphTypes());
       return;
     }
-    const [nextSchema, nextExamples] = await Promise.all([
+    const [nextSchema, nextGraph, nextExamples] = await Promise.all([
       fetchSchemaSummary(scenarioId),
+      fetchSchemaGraph(scenarioId),
       fetchExampleGroups(scenarioId),
     ]);
     setSchemaSummary(nextSchema);
+    setSchemaGraph(nextGraph);
     setExampleGroups(nextExamples);
   }, []);
 
@@ -379,6 +479,7 @@ export default function App() {
         setSessionPayload(payload);
         setRawMessages(payload.messages);
         setThreadState(payload.state ?? {});
+        setActiveGraphTypes(extractActiveGraphTypes(payload.state ?? {}));
         setSelectedToolCall(null);
         setStatusText(payload.status === "running" ? "正在恢复执行状态" : "准备就绪");
         setIsRunning(payload.status === "running");
@@ -401,6 +502,7 @@ export default function App() {
       setSessionPayload(payload);
       setRawMessages([]);
       setThreadState({});
+      setActiveGraphTypes(emptyActiveGraphTypes());
       setSelectedToolCall(null);
       setStatusText("准备就绪");
       setIsRunning(false);
@@ -423,6 +525,7 @@ export default function App() {
       setSessionPayload(createEmptySession(sessionId, scenario));
       setRawMessages([]);
       setThreadState({});
+      setActiveGraphTypes(emptyActiveGraphTypes());
       setSelectedToolCall(null);
       setStatusText("准备就绪");
       setIsRunning(false);
@@ -455,6 +558,32 @@ export default function App() {
     }
   }, [rawMessages.length, scenarios, sessionPayload.scenario_id]);
 
+  useEffect(() => {
+    if (schemaGraph) {
+      setGraphFitRequestKey((current) => current + 1);
+    }
+  }, [schemaGraph]);
+
+  useEffect(() => {
+    if (graphSidebarOpen) {
+      setGraphPanelWidth(clampGraphPanelWidth(Number.MAX_SAFE_INTEGER));
+      setGraphFitRequestKey((current) => current + 1);
+    }
+  }, [clampGraphPanelWidth, graphSidebarOpen]);
+
+  useEffect(() => {
+    if (!graphSidebarOpen) {
+      return;
+    }
+    const handleResize = () => {
+      setGraphPanelWidth((current) => clampGraphPanelWidth(current));
+    };
+    window.addEventListener("resize", handleResize);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [clampGraphPanelWidth, graphSidebarOpen]);
+
   const threadMessages = useMemo(() => rawMessagesToThreadMessages(rawMessages), [rawMessages]);
   const currentTitle = sessionTitleFromPayload(sessionPayload);
   const suggestionCards = useMemo(
@@ -467,6 +596,47 @@ export default function App() {
     setSelectedToolCall(selection);
     setInspectorOpen(true);
   }, []);
+
+  const handleGraphResizerPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (!graphSidebarOpen) {
+        return;
+      }
+      event.preventDefault();
+      const pointerId = event.pointerId;
+      const target = event.currentTarget;
+      setIsResizingGraphPanel(true);
+      target.setPointerCapture(pointerId);
+
+      const updateWidth = (clientX: number) => {
+        const bounds = workspaceBodyRef.current?.getBoundingClientRect();
+        if (!bounds) {
+          return;
+        }
+        const nextWidth = bounds.right - clientX;
+        setGraphPanelWidth(clampGraphPanelWidth(nextWidth));
+      };
+
+      updateWidth(event.clientX);
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        updateWidth(moveEvent.clientX);
+      };
+
+      const handlePointerUp = () => {
+        setIsResizingGraphPanel(false);
+        target.releasePointerCapture(pointerId);
+        target.removeEventListener("pointermove", handlePointerMove);
+        target.removeEventListener("pointerup", handlePointerUp);
+        target.removeEventListener("pointercancel", handlePointerUp);
+      };
+
+      target.addEventListener("pointermove", handlePointerMove);
+      target.addEventListener("pointerup", handlePointerUp);
+      target.addEventListener("pointercancel", handlePointerUp);
+    },
+    [clampGraphPanelWidth, graphSidebarOpen],
+  );
 
   const syncSnapshotState = useCallback((snapshot: Record<string, unknown>) => {
     setThreadState(snapshot);
@@ -484,6 +654,12 @@ export default function App() {
       }
       if (event.type === "STATE_SNAPSHOT" && event.snapshot && typeof event.snapshot === "object") {
         syncSnapshotState(event.snapshot as Record<string, unknown>);
+      }
+      if (event.type === "CUSTOM" && event.name === "kgqa_ui_payload") {
+        const nextActiveTypes = extractEventActiveGraphTypes(event);
+        if (nextActiveTypes) {
+          setActiveGraphTypes(nextActiveTypes);
+        }
       }
       if (event.type === "RUN_FINISHED") {
         setIsRunning(false);
@@ -533,6 +709,7 @@ export default function App() {
         const payload = await fetchSessionPayload(currentSessionIdRef.current);
         setSessionPayload(payload);
         syncSnapshotState(payload.state ?? {});
+        setActiveGraphTypes(extractActiveGraphTypes(payload.state ?? {}));
       } catch (error) {
         setIsRunning(false);
         setStatusText("执行失败");
@@ -615,9 +792,15 @@ export default function App() {
     : !sessionPayload.scenario_id
       ? "请先选择场景，然后开始提问。"
       : null;
+  const appShellStyle: LayoutStyleVars = {
+    "--sidebar-width": sidebarCollapsed ? "0px" : "320px",
+  };
+  const workspaceBodyStyle: LayoutStyleVars = {
+    "--graph-panel-width": `${graphPanelWidth}px`,
+  };
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${isResizingGraphPanel ? "is-resizing" : ""}`} style={appShellStyle}>
       <ScenarioPickerDialog
         open={scenarioPickerOpen}
         scenarios={scenarios}
@@ -627,19 +810,34 @@ export default function App() {
         }}
       />
 
-      <aside className="sidebar">
+      <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
         <div className="sidebar-top">
-          <div className="brand">
-            <div className="brand-icon">
-              <GitBranch size={16} />
+          <div className="sidebar-top-row">
+            <div className="brand">
+              <div className="brand-icon">
+                <GitBranch size={16} />
+              </div>
+              <div className="brand-copy">
+                <strong>KG-QA Copilot</strong>
+                <span>Knowledge Graph Chat</span>
+              </div>
             </div>
-            <div className="brand-copy">
-              <strong>KG-QA Copilot</strong>
-              <span>Knowledge Graph Chat</span>
-            </div>
+            {!sidebarCollapsed ? (
+              <button
+                type="button"
+                className="sidebar-toggle"
+                aria-label="收起侧边栏"
+                title="收起侧边栏"
+                onClick={() => {
+                  setSidebarCollapsed(true);
+                }}
+              >
+                <PanelLeftClose size={16} />
+              </button>
+            ) : null}
           </div>
 
-          <button className="new-thread-button" onClick={openScenarioPicker}>
+          <button className="new-thread-button" onClick={openScenarioPicker} aria-label="新会话" title="新会话">
             <Plus size={16} />
             <span>新会话</span>
           </button>
@@ -700,60 +898,126 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="workspace">
-        <header className="workspace-header">
-          <div className="workspace-heading">
-            <h1>{currentTitle}</h1>
-            {sessionPayload.scenario_label ? <p>{sessionPayload.scenario_label}</p> : null}
-          </div>
-        </header>
+        <main className="workspace">
+          <header className="workspace-header">
+            <div className="workspace-heading-group">
+              {sidebarCollapsed ? (
+                <button
+                  type="button"
+                  className="sidebar-toggle"
+                  aria-label="展开侧边栏"
+                  title="展开侧边栏"
+                  onClick={() => {
+                    setSidebarCollapsed(false);
+                  }}
+                >
+                  <PanelLeftOpen size={16} />
+                </button>
+              ) : null}
+              <div className="workspace-heading">
+                <h1>{currentTitle}</h1>
+                {sessionPayload.scenario_label ? <p>{sessionPayload.scenario_label}</p> : null}
+              </div>
+            </div>
+          </header>
 
         {globalError ? <div className="error-banner">{globalError}</div> : null}
 
-        <div className="thread-shell">
-          <div className="thread-shell-header">
-            <div className="thread-context">
-              {llmStatus?.model ? (
-                <span className="context-badge">
-                  <Sparkles size={13} />
-                  {llmStatus.model}
-                </span>
-              ) : null}
-              {sessionPayload.scenario_label ? (
-                <span className="context-badge">
-                  <GitBranch size={13} />
-                  {sessionPayload.scenario_label}
-                </span>
-              ) : null}
-              {sessionPayload.dataset_name ? (
-                <span className="context-badge">
-                  <Database size={13} />
-                  {sessionPayload.dataset_name}
-                </span>
-              ) : null}
+        <div className="workspace-toolbar">
+          <div className="thread-context">
+            {llmStatus?.model ? (
+              <span className="context-badge">
+                <Sparkles size={13} />
+                {llmStatus.model}
+              </span>
+            ) : null}
+            {sessionPayload.scenario_label ? (
+              <span className="context-badge">
+                <GitBranch size={13} />
+                {sessionPayload.scenario_label}
+              </span>
+            ) : null}
+            {sessionPayload.dataset_name ? (
               <span className="context-badge">
                 <Database size={13} />
-                {graphSummary}
+                {sessionPayload.dataset_name}
               </span>
-            </div>
+            ) : null}
+            <span className="context-badge">
+              <Database size={13} />
+              {graphSummary}
+            </span>
+            <button
+              type="button"
+              className={`graph-toggle ${graphSidebarOpen ? "active" : ""}`}
+              onClick={() => {
+                setGraphSidebarOpen((current) => !current);
+              }}
+            >
+              <GitBranch size={13} />
+              图谱
+            </button>
+          </div>
+        </div>
+
+        <div
+          ref={workspaceBodyRef}
+          className={`workspace-body ${graphSidebarOpen ? "graph-open" : ""} ${isResizingGraphPanel ? "is-resizing" : ""}`}
+          style={workspaceBodyStyle}
+        >
+          <div className="thread-shell">
+            <section className="thread-panel">
+              <AssistantThread
+                messages={threadMessages}
+                isRunning={isRunning}
+                statusText={statusText}
+                suggestions={suggestionCards}
+                startupHint={startupPending ? loadingState : null}
+                composerDisabled={startupPending || !sessionPayload.scenario_id}
+                composerDisabledReason={composerDisabledReason}
+                onSubmit={handleComposerSubmit}
+                onSuggestionClick={(question) => {
+                  void runQuestion(question);
+                }}
+                onToolClick={handleToolSelection}
+              />
+            </section>
           </div>
 
-          <section className="thread-panel">
-            <AssistantThread
-              messages={threadMessages}
-              isRunning={isRunning}
-              statusText={statusText}
-              suggestions={suggestionCards}
-              startupHint={startupPending ? loadingState : null}
-              composerDisabled={startupPending || !sessionPayload.scenario_id}
-              composerDisabledReason={composerDisabledReason}
-              onSubmit={handleComposerSubmit}
-              onSuggestionClick={(question) => {
-                void runQuestion(question);
-              }}
-              onToolClick={handleToolSelection}
-            />
-          </section>
+          {graphSidebarOpen ? (
+            <>
+              <div
+                className="graph-resizer"
+                role="separator"
+                aria-label="调整图谱宽度"
+                aria-orientation="vertical"
+                onDoubleClick={() => {
+                  setGraphPanelWidth(clampGraphPanelWidth(Number.MAX_SAFE_INTEGER));
+                }}
+                onPointerDown={handleGraphResizerPointerDown}
+              >
+                <span className="graph-resizer-handle" />
+              </div>
+
+              <aside className="graph-panel-shell">
+                <section className="graph-panel">
+                  <div className="graph-panel-header">
+                    <div>
+                      <h2>Schema 图</h2>
+                      <p>展示当前场景的实体结构，并高亮最近一次成功查询涉及的类型。</p>
+                    </div>
+                  </div>
+                  <div className="graph-panel-body">
+                    <SchemaGraphView
+                      graph={schemaGraph}
+                      activeTypes={activeGraphTypes}
+                      fitRequestKey={graphFitRequestKey}
+                    />
+                  </div>
+                </section>
+              </aside>
+            </>
+          ) : null}
         </div>
 
         <Dialog.Root open={inspectorOpen} onOpenChange={setInspectorOpen}>

@@ -30,6 +30,41 @@ export interface SchemaSummaryPayload {
   paths?: string[];
 }
 
+export interface GraphActiveTypes {
+  entities: string[];
+  relationships: string[];
+}
+
+export interface GraphDelta {
+  active_types: GraphActiveTypes;
+  nodes: unknown[];
+  edges: unknown[];
+  inference_level: string;
+}
+
+export interface SchemaGraphNode {
+  id: string;
+  entity_name: string;
+  label: string;
+  description?: string;
+  properties: string[];
+}
+
+export interface SchemaGraphLink {
+  source: string;
+  target: string;
+  label: string;
+  cardinality?: string;
+  description?: string;
+}
+
+export interface SchemaGraphData {
+  dataset: string;
+  description?: string;
+  nodes: SchemaGraphNode[];
+  links: SchemaGraphLink[];
+}
+
 export interface ExampleCase {
   id: string;
   question: string;

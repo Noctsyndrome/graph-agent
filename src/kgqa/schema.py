@@ -78,6 +78,54 @@ class SchemaRegistry:
             "paths": self._schema.get("paths", {}),
         }
 
+    def graph_data(self) -> dict[str, Any]:
+        nodes = [
+            {
+                "id": entity["name"],
+                "entity_name": entity["name"],
+                "label": entity.get("description") or entity["name"],
+                "description": entity.get("description", ""),
+                "properties": list(entity.get("properties", {}).keys()),
+            }
+            for entity in self._schema.get("entities", [])
+        ]
+        links = [
+            {
+                "source": relation["from"],
+                "target": relation["to"],
+                "label": relation["name"],
+                "cardinality": relation.get("cardinality", ""),
+                "description": relation.get("description", ""),
+            }
+            for relation in self._schema.get("relationships", [])
+        ]
+        return {
+            "dataset": self._schema.get("dataset"),
+            "description": self._schema.get("description"),
+            "nodes": nodes,
+            "links": links,
+        }
+
+    def extract_active_types(self, cypher: str) -> dict[str, list[str]]:
+        entity_names = {str(entity.get("name", "")).strip() for entity in self._schema.get("entities", [])}
+        relationship_names = {
+            str(relation.get("name", "")).strip() for relation in self._schema.get("relationships", [])
+        }
+        entities = {
+            match
+            for match in re.findall(r"\([^)]*:(?P<label>[A-Za-z_][A-Za-z0-9_]*)", cypher)
+            if match in entity_names
+        }
+        relationships = {
+            match
+            for match in re.findall(r"\[[^\]]*:(?P<name>[A-Za-z_][A-Za-z0-9_]*)", cypher)
+            if match in relationship_names
+        }
+        return {
+            "entities": sorted(entities),
+            "relationships": sorted(relationships),
+        }
+
     # ------------------------------------------------------------------
     # Focus inference – driven by schema + domain registry
     # ------------------------------------------------------------------

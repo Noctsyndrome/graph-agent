@@ -121,6 +121,20 @@ def test_scenarios_endpoint_returns_hvac_elevator_and_property() -> None:
     assert {item["id"] for item in payload} == {"elevator", "hvac", "property"}
 
 
+def test_schema_graph_endpoint_returns_nodes_and_links() -> None:
+    client = TestClient(app)
+
+    response = client.get("/schema/graph?scenario_id=property")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["dataset"] == "property_ops"
+    assert len(payload["nodes"]) == 6
+    assert len(payload["links"]) == 6
+    assert any(node["id"] == "Space" for node in payload["nodes"])
+    assert any(link["label"] == "HAS_SPACE" for link in payload["links"])
+
+
 def test_chat_stream_endpoint_returns_sse(monkeypatch) -> None:
     clear_sessions()
     monkeypatch.setattr("kgqa.api.get_kgqa_agent", lambda settings, scenario=None: _FakeAgent())

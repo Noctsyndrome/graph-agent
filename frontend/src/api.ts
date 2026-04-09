@@ -7,6 +7,7 @@ import type {
   HealthPayload,
   LlmStatusPayload,
   ScenarioSummary,
+  SchemaGraphData,
   SchemaSummaryPayload,
 } from "./types";
 
@@ -39,6 +40,11 @@ export function fetchScenarios(): Promise<ScenarioSummary[]> {
 export function fetchSchemaSummary(scenarioId?: string): Promise<SchemaSummaryPayload> {
   const suffix = scenarioId ? `?scenario_id=${encodeURIComponent(scenarioId)}` : "";
   return readJson<SchemaSummaryPayload>(`/schema${suffix}`);
+}
+
+export function fetchSchemaGraph(scenarioId?: string): Promise<SchemaGraphData> {
+  const suffix = scenarioId ? `?scenario_id=${encodeURIComponent(scenarioId)}` : "";
+  return readJson<SchemaGraphData>(`/schema/graph${suffix}`);
 }
 
 export function fetchSessions(): Promise<ChatSessionSummary[]> {

@@ -620,17 +620,19 @@ class KGQAAgent:
             }
         )
 
-        state["toolHistory"] = list(state.get("toolHistory", [])) + [
-            {
-                "tool_name": tool_name,
-                "status": tool_status,
-                "tool_args": tool_args,
-                "tool_result": self._summarize_observation(tool_name, tool_result, tool_status),
-                "timestamp": time.time(),
-            }
-        ]
+        history_item = {
+            "tool_name": tool_name,
+            "status": tool_status,
+            "tool_args": tool_args,
+            "tool_result": self._summarize_observation(tool_name, tool_result, tool_status),
+            "timestamp": time.time(),
+        }
         if tool_name == "execute_cypher" and tool_status == "ok":
             state["_latest_rows"] = list(tool_result.get("rows", []))
+            graph_delta = self._graph_delta_from_cypher(tool_args.get("cypher"))
+            history_item["graph_delta"] = graph_delta
+            state["_latest_graph_delta"] = graph_delta
+        state["toolHistory"] = list(state.get("toolHistory", [])) + [history_item]
         if tool_name == "format_results" and tool_status == "ok":
             state["latestResult"] = tool_result
         clean_state = self._public_state(state)
@@ -648,6 +650,7 @@ class KGQAAgent:
                     "type": "CUSTOM",
                     "name": "kgqa_ui_payload",
                     "value": tool_result,
+                    "graph_delta": state.get("_latest_graph_delta"),
                     "timestamp": time.time(),
                 }
             )
@@ -713,7 +716,20 @@ class KGQAAgent:
 
     @staticmethod
     def _public_state(state: dict[str, Any]) -> dict[str, Any]:
-        return {key: value for key, value in state.items() if key not in {"_event_buffer", "_latest_rows", "_budget"}}
+        return {
+            key: value
+            for key, value in state.items()
+            if key not in {"_event_buffer", "_latest_rows", "_latest_graph_delta", "_budget"}
+        }
+
+    def _graph_delta_from_cypher(self, cypher: Any) -> dict[str, Any]:
+        active_types = self.schema.extract_active_types(str(cypher or ""))
+        return {
+            "active_types": active_types,
+            "nodes": [],
+            "edges": [],
+            "inference_level": "exact",
+        }
 
     def _summarize_observation(self, tool_name: str, value: dict[str, Any], status: str) -> dict[str, Any]:
         if status == "error":
