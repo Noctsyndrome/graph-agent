@@ -43,22 +43,24 @@ export function SchemaGraphView({
     }
     const activeEntities = new Set(activeTypes.entities);
     const activeRelationships = new Set(activeTypes.relationships);
+    const nodes = graph.nodes.map(
+      (node): GraphNode => ({
+        ...node,
+        active: activeEntities.has(node.entity_name),
+        color: activeEntities.has(node.entity_name) ? "#111827" : "#d6d3d1",
+        textColor: activeEntities.has(node.entity_name) ? "#111827" : "#78716c",
+      }),
+    );
+    const links = graph.links.map(
+      (link): GraphLink => ({
+        ...link,
+        active: activeRelationships.has(link.label),
+        color: activeRelationships.has(link.label) ? "#0f172a" : "rgba(120, 113, 108, 0.28)",
+      }),
+    );
     return {
-      nodes: graph.nodes.map(
-        (node): GraphNode => ({
-          ...node,
-          active: activeEntities.has(node.entity_name),
-          color: activeEntities.has(node.entity_name) ? "#111827" : "#d6d3d1",
-          textColor: activeEntities.has(node.entity_name) ? "#111827" : "#78716c",
-        }),
-      ),
-      links: graph.links.map(
-        (link): GraphLink => ({
-          ...link,
-          active: activeRelationships.has(link.label),
-          color: activeRelationships.has(link.label) ? "#0f172a" : "rgba(120, 113, 108, 0.28)",
-        }),
-      ),
+      nodes: nodes.sort((left, right) => Number(left.active) - Number(right.active)),
+      links: links.sort((left, right) => Number(left.active) - Number(right.active)),
     };
   }, [activeTypes.entities, activeTypes.relationships, graph]);
 
@@ -80,6 +82,11 @@ export function SchemaGraphView({
       setIsSettling(false);
     }, 140);
   }, [data.nodes]);
+
+  const handleNodeDragEnd = useCallback((node: GraphNode) => {
+    node.fx = node.x;
+    node.fy = node.y;
+  }, []);
 
   useEffect(() => {
     if (!graphRef.current) {
@@ -159,7 +166,10 @@ export function SchemaGraphView({
           linkCurvature={0.1}
           enablePanInteraction
           enableZoomInteraction
-          enableNodeDrag={false}
+          enableNodeDrag
+          onNodeDragEnd={(node) => {
+            handleNodeDragEnd(node as GraphNode);
+          }}
           nodeCanvasObject={(node, context, globalScale) => {
             const graphNode = node as GraphNode;
             const label = graphNode.label || graphNode.entity_name;
