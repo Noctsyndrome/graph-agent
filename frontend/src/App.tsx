@@ -80,6 +80,21 @@ function emptyActiveGraphTypes(): GraphActiveTypes {
   };
 }
 
+function equalStringSets(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  const rightSet = new Set(right);
+  return left.every((value) => rightSet.has(value));
+}
+
+function equalActiveGraphTypes(left: GraphActiveTypes, right: GraphActiveTypes): boolean {
+  return (
+    equalStringSets(left.entities, right.entities) &&
+    equalStringSets(left.relationships, right.relationships)
+  );
+}
+
 function extractActiveGraphTypes(state: Record<string, unknown>): GraphActiveTypes {
   const toolHistory = state.toolHistory;
   if (!Array.isArray(toolHistory)) {
@@ -410,6 +425,10 @@ export default function App() {
     threadStateRef.current = threadState;
   }, [threadState]);
 
+  const updateActiveGraphTypes = useCallback((nextValue: GraphActiveTypes) => {
+    setActiveGraphTypes((current) => (equalActiveGraphTypes(current, nextValue) ? current : nextValue));
+  }, []);
+
   const clampGraphPanelWidth = useCallback((nextWidth: number) => {
     const containerWidth = workspaceBodyRef.current?.getBoundingClientRect().width ?? 0;
     const maxWidth = containerWidth
@@ -422,13 +441,13 @@ export default function App() {
   }, []);
 
   const refreshScenarioMeta = useCallback(async (scenarioId: string) => {
-    if (!scenarioId) {
-      setSchemaSummary(null);
-      setSchemaGraph(null);
-      setExampleGroups([]);
-      setActiveGraphTypes(emptyActiveGraphTypes());
-      return;
-    }
+      if (!scenarioId) {
+        setSchemaSummary(null);
+        setSchemaGraph(null);
+        setExampleGroups([]);
+        updateActiveGraphTypes(emptyActiveGraphTypes());
+        return;
+      }
     const [nextSchema, nextGraph, nextExamples] = await Promise.all([
       fetchSchemaSummary(scenarioId),
       fetchSchemaGraph(scenarioId),
@@ -437,7 +456,7 @@ export default function App() {
     setSchemaSummary(nextSchema);
     setSchemaGraph(nextGraph);
     setExampleGroups(nextExamples);
-  }, []);
+  }, [updateActiveGraphTypes]);
 
   const refreshMeta = useCallback(async () => {
     setLoadingState("正在刷新系统状态");
@@ -479,7 +498,7 @@ export default function App() {
         setSessionPayload(payload);
         setRawMessages(payload.messages);
         setThreadState(payload.state ?? {});
-        setActiveGraphTypes(extractActiveGraphTypes(payload.state ?? {}));
+        updateActiveGraphTypes(extractActiveGraphTypes(payload.state ?? {}));
         setSelectedToolCall(null);
         setStatusText(payload.status === "running" ? "正在恢复执行状态" : "准备就绪");
         setIsRunning(payload.status === "running");
@@ -491,7 +510,7 @@ export default function App() {
         setLoadingState("");
       }
     },
-    [refreshScenarioMeta],
+    [refreshScenarioMeta, updateActiveGraphTypes],
   );
 
   const startScenarioSession = useCallback(
@@ -502,7 +521,7 @@ export default function App() {
       setSessionPayload(payload);
       setRawMessages([]);
       setThreadState({});
-      setActiveGraphTypes(emptyActiveGraphTypes());
+      updateActiveGraphTypes(emptyActiveGraphTypes());
       setSelectedToolCall(null);
       setStatusText("准备就绪");
       setIsRunning(false);
@@ -510,7 +529,7 @@ export default function App() {
       setScenarioPickerOpen(false);
       await refreshScenarioMeta(scenario.id);
     },
-    [refreshScenarioMeta],
+    [refreshScenarioMeta, updateActiveGraphTypes],
   );
 
   const openScenarioPicker = useCallback(() => {
@@ -525,7 +544,7 @@ export default function App() {
       setSessionPayload(createEmptySession(sessionId, scenario));
       setRawMessages([]);
       setThreadState({});
-      setActiveGraphTypes(emptyActiveGraphTypes());
+      updateActiveGraphTypes(emptyActiveGraphTypes());
       setSelectedToolCall(null);
       setStatusText("准备就绪");
       setIsRunning(false);
@@ -539,7 +558,7 @@ export default function App() {
         setScenarioPickerOpen(true);
       }
     },
-    [refreshScenarioMeta, scenarios],
+    [refreshScenarioMeta, scenarios, updateActiveGraphTypes],
   );
 
   useEffect(() => {
@@ -658,7 +677,7 @@ export default function App() {
       if (event.type === "CUSTOM" && event.name === "kgqa_ui_payload") {
         const nextActiveTypes = extractEventActiveGraphTypes(event);
         if (nextActiveTypes) {
-          setActiveGraphTypes(nextActiveTypes);
+          updateActiveGraphTypes(nextActiveTypes);
         }
       }
       if (event.type === "RUN_FINISHED") {
@@ -672,7 +691,7 @@ export default function App() {
 
       setRawMessages((current) => applyStreamEventToRawMessages(current, event));
     },
-    [syncSnapshotState],
+    [syncSnapshotState, updateActiveGraphTypes],
   );
 
   const runQuestion = useCallback(
@@ -709,14 +728,22 @@ export default function App() {
         const payload = await fetchSessionPayload(currentSessionIdRef.current);
         setSessionPayload(payload);
         syncSnapshotState(payload.state ?? {});
-        setActiveGraphTypes(extractActiveGraphTypes(payload.state ?? {}));
+        updateActiveGraphTypes(extractActiveGraphTypes(payload.state ?? {}));
       } catch (error) {
         setIsRunning(false);
         setStatusText("执行失败");
         setGlobalError(error instanceof Error ? error.message : String(error));
       }
     },
-    [handleStreamEvent, isRunning, loadingState, refreshSessions, sessionPayload.scenario_id, syncSnapshotState],
+    [
+      handleStreamEvent,
+      isRunning,
+      loadingState,
+      refreshSessions,
+      sessionPayload.scenario_id,
+      syncSnapshotState,
+      updateActiveGraphTypes,
+    ],
   );
 
   const handleComposerSubmit = useCallback(

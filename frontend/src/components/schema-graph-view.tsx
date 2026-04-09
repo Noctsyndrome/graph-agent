@@ -4,19 +4,13 @@ import ForceGraph2D from "react-force-graph-2d";
 import type { GraphActiveTypes, SchemaGraphData, SchemaGraphLink, SchemaGraphNode } from "../types";
 
 type GraphNode = SchemaGraphNode & {
-  active: boolean;
-  color: string;
-  textColor: string;
   x?: number;
   y?: number;
   fx?: number;
   fy?: number;
 };
 
-type GraphLink = SchemaGraphLink & {
-  active: boolean;
-  color: string;
-};
+type GraphLink = SchemaGraphLink;
 
 export function SchemaGraphView({
   graph,
@@ -37,39 +31,39 @@ export function SchemaGraphView({
   const [isSettling, setIsSettling] = useState(true);
   const [size, setSize] = useState({ width: FALLBACK_WIDTH, height: FALLBACK_HEIGHT });
 
-  const data = useMemo(() => {
+  const sizeBucket = useMemo(
+    () => `${Math.round(size.width / 24)}:${Math.round(size.height / 24)}`,
+    [size.height, size.width],
+  );
+
+  const activeEntitySet = useMemo(() => new Set(activeTypes.entities), [activeTypes.entities]);
+  const activeRelationshipSet = useMemo(() => new Set(activeTypes.relationships), [activeTypes.relationships]);
+
+  const layoutGraph = useMemo(() => {
     if (!graph) {
       return { nodes: [] as GraphNode[], links: [] as GraphLink[] };
     }
-    const activeEntities = new Set(activeTypes.entities);
-    const activeRelationships = new Set(activeTypes.relationships);
-    const nodes = graph.nodes.map(
-      (node): GraphNode => ({
-        ...node,
-        active: activeEntities.has(node.entity_name),
-        color: activeEntities.has(node.entity_name) ? "#111827" : "#d6d3d1",
-        textColor: activeEntities.has(node.entity_name) ? "#111827" : "#78716c",
-      }),
-    );
-    const links = graph.links.map(
-      (link): GraphLink => ({
-        ...link,
-        active: activeRelationships.has(link.label),
-        color: activeRelationships.has(link.label) ? "#0f172a" : "rgba(120, 113, 108, 0.28)",
-      }),
-    );
     return {
-      nodes: nodes.sort((left, right) => Number(left.active) - Number(right.active)),
-      links: links.sort((left, right) => Number(left.active) - Number(right.active)),
+      nodes: graph.nodes.map((node): GraphNode => ({ ...node })),
+      links: graph.links.map((link): GraphLink => ({ ...link })),
     };
-  }, [activeTypes.entities, activeTypes.relationships, graph]);
+  }, [graph]);
+
+  const layoutKey = useMemo(() => {
+    if (!graph) {
+      return "";
+    }
+    const nodeKey = graph.nodes.map((node) => node.id).join("|");
+    const linkKey = graph.links.map((link) => `${link.source}>${link.label}>${link.target}`).join("|");
+    return `${nodeKey}::${linkKey}`;
+  }, [graph]);
 
   const handleEngineStop = useCallback(() => {
-    if (!graphRef.current || !shouldFitOnStopRef.current || !data.nodes.length) {
+    if (!graphRef.current || !shouldFitOnStopRef.current || !layoutGraph.nodes.length) {
       return;
     }
     shouldFitOnStopRef.current = false;
-    for (const node of data.nodes) {
+    for (const node of layoutGraph.nodes) {
       node.fx = node.x;
       node.fy = node.y;
     }
@@ -81,7 +75,7 @@ export function SchemaGraphView({
     window.setTimeout(() => {
       setIsSettling(false);
     }, 140);
-  }, [data.nodes]);
+  }, [layoutGraph.nodes]);
 
   const handleNodeDragEnd = useCallback((node: GraphNode) => {
     node.fx = node.x;
@@ -97,18 +91,18 @@ export function SchemaGraphView({
   }, []);
 
   useEffect(() => {
-    if (!graphRef.current || !data.nodes.length) {
+    if (!graphRef.current || !layoutGraph.nodes.length) {
       return;
     }
     setIsSettling(true);
-    for (const node of data.nodes) {
+    for (const node of layoutGraph.nodes) {
       delete node.fx;
       delete node.fy;
     }
     shouldFitOnStopRef.current = true;
     graphRef.current.d3ReheatSimulation();
     graphRef.current.resumeAnimation?.();
-  }, [data.nodes, fitRequestKey]);
+  }, [fitRequestKey, layoutGraph.nodes, layoutKey, sizeBucket]);
 
   useEffect(() => {
     const element = shellRef.current;
@@ -154,7 +148,7 @@ export function SchemaGraphView({
           ref={graphRef}
           width={size.width}
           height={size.height}
-          graphData={data}
+          graphData={layoutGraph}
           backgroundColor="rgba(0,0,0,0)"
           nodeRelSize={6}
           warmupTicks={24}
@@ -164,6 +158,9 @@ export function SchemaGraphView({
           linkDirectionalArrowLength={4}
           linkDirectionalArrowRelPos={1}
           linkCurvature={0.1}
+          nodeCanvasObjectMode={(node) =>
+            activeEntitySet.has((node as GraphNode).entity_name) ? "after" : "replace"
+          }
           enablePanInteraction
           enableZoomInteraction
           enableNodeDrag
@@ -172,15 +169,16 @@ export function SchemaGraphView({
           }}
           nodeCanvasObject={(node, context, globalScale) => {
             const graphNode = node as GraphNode;
+            const isActive = activeEntitySet.has(graphNode.entity_name);
             const label = graphNode.label || graphNode.entity_name;
             const fontSize = Math.max(11, 14 / globalScale);
             context.beginPath();
             context.arc(graphNode.x ?? 0, graphNode.y ?? 0, 8, 0, 2 * Math.PI, false);
-            context.fillStyle = graphNode.color;
+            context.fillStyle = isActive ? "#111827" : "#d6d3d1";
             context.fill();
 
             context.font = `600 ${fontSize}px Geist, sans-serif`;
-            context.fillStyle = graphNode.textColor;
+            context.fillStyle = isActive ? "#111827" : "#78716c";
             context.textAlign = "center";
             context.textBaseline = "top";
             context.fillText(label, graphNode.x ?? 0, (graphNode.y ?? 0) + 12);
@@ -196,8 +194,10 @@ export function SchemaGraphView({
             const graphNode = node as GraphNode;
             return `${graphNode.entity_name}\n${graphNode.properties.join(", ")}`;
           }}
-          linkColor={(link) => (link as GraphLink).color}
-          linkWidth={(link) => ((link as GraphLink).active ? 2.4 : 1)}
+          linkColor={(link) =>
+            activeRelationshipSet.has((link as GraphLink).label) ? "#0f172a" : "rgba(120, 113, 108, 0.28)"
+          }
+          linkWidth={(link) => (activeRelationshipSet.has((link as GraphLink).label) ? 2.4 : 1)}
           linkLabel={(link) => {
             const graphLink = link as GraphLink;
             const detail = graphLink.cardinality ? ` (${graphLink.cardinality})` : "";
