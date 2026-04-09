@@ -53,11 +53,12 @@ def close_all_kgqa_agents() -> None:
 
 
 class KGQAAgent:
-    AUX_TOOLS = {"get_schema_context", "list_domain_values", "match_value", "diagnose_error"}
+    AUX_TOOLS = {"get_schema_context", "list_domain_values", "match_value", "diagnose_error", "inspect_recent_executions"}
     MAIN_TOOLS = {"validate_cypher", "execute_cypher", "format_results"}
     AUX_BUDGET = 4
     MAIN_BUDGET = 8
     MAX_TOTAL_TURNS = AUX_BUDGET + MAIN_BUDGET + 4
+    FULL_ROWS_HISTORY_LIMIT = 20
 
     def __init__(self, settings: Settings, scenario: ScenarioDefinition):
         self.settings = settings
@@ -400,6 +401,7 @@ class KGQAAgent:
             "- schema context 已在会话开始时自动注入，通常不需要再次调用 get_schema_context。\n"
             "- 如果问题涉及模糊值（品牌简称、类别别名等），调用 match_value 确认精确值。\n"
             "- 如果需要浏览某实体某字段的所有可选值，调用 list_domain_values(kind='Entity.field')。\n"
+            "- 如果当前问题引用了前序查询的结果（如“这几个”“上面的”“其中”“这些”等），在进入阶段 2 前先调用 inspect_recent_executions，从真实 Cypher 还原前序约束；不得仅凭对话历史文本中的自然语言回答推断约束。\n"
             "- 如果问题是纯统计/排序/Top N 且不涉及模糊值，可以跳过此阶段。\n\n"
             "## 阶段 2：查询（Query）\n"
             "目标：生成正确的 Cypher 并执行。\n"
@@ -442,7 +444,8 @@ class KGQAAgent:
         # Section 2: recent transcript (Q&A pairs only, no tool noise)
         if transcript:
             sections.append(
-                "## 对话历史（追问时必须延续前文的查询范围和约束条件）\n" + transcript
+                "## 对话历史（仅供语境参考；前序查询的具体约束须通过 inspect_recent_executions 获取，不可从此处文本猜测）\n"
+                + transcript
             )
 
         # Section 3: candidate domain matches (compact)
@@ -471,7 +474,25 @@ class KGQAAgent:
                 result_summary = obs.get("tool_result", {})
                 if isinstance(result_summary, dict):
                     # Only include key fields to reduce token usage
-                    compact = {k: v for k, v in result_summary.items() if k in ("status", "error", "hint", "row_count", "columns", "rows_preview", "note", "exact_match", "fuzzy_matches", "value")}
+                    compact = {
+                        k: v
+                        for k, v in result_summary.items()
+                        if k
+                        in (
+                            "status",
+                            "error",
+                            "hint",
+                            "row_count",
+                            "columns",
+                            "rows_preview",
+                            "rows",
+                            "note",
+                            "exact_match",
+                            "fuzzy_matches",
+                            "value",
+                            "executions",
+                        )
+                    }
                     if compact:
                         result_summary = compact
                 obs_lines.append(f"- [{status}] {tool}: {json.dumps(result_summary, ensure_ascii=False)}")
@@ -576,6 +597,7 @@ class KGQAAgent:
         tool_call_id = str(uuid.uuid4())
         tool_parent_message_id = str(uuid.uuid4())
         tool_result_message_id = str(uuid.uuid4())
+        visible_tool_args = dict(tool_args)
 
         assistant_tool_message = {
             "id": tool_parent_message_id,
@@ -587,7 +609,7 @@ class KGQAAgent:
                     "type": "function",
                     "function": {
                         "name": tool_name,
-                        "arguments": json.dumps(tool_args, ensure_ascii=False),
+                        "arguments": json.dumps(visible_tool_args, ensure_ascii=False),
                     },
                 }
             ],
@@ -596,11 +618,17 @@ class KGQAAgent:
 
         # Auto-supply full rows for format_results from latest execute_cypher
         # so the LLM's truncated observation doesn't cause data loss.
+        invocation_tool_args = dict(visible_tool_args)
         if tool_name == "format_results" and state.get("_latest_rows") is not None:
-            tool_args = {**tool_args, "rows": state["_latest_rows"]}
+            invocation_tool_args = {**invocation_tool_args, "rows": state["_latest_rows"]}
+        if tool_name == "inspect_recent_executions":
+            invocation_tool_args = {
+                **invocation_tool_args,
+                "tool_history": list(state.get("toolHistory", [])),
+            }
 
         try:
-            tool_result = self.toolbox.invoke(tool_name, tool_args)
+            tool_result = self.toolbox.invoke(tool_name, invocation_tool_args)
         except Exception as exc:
             tool_result = {
                 "status": "error",
@@ -623,13 +651,14 @@ class KGQAAgent:
         history_item = {
             "tool_name": tool_name,
             "status": tool_status,
-            "tool_args": tool_args,
+            "tool_args": visible_tool_args,
             "tool_result": self._summarize_observation(tool_name, tool_result, tool_status),
             "timestamp": time.time(),
         }
         if tool_name == "execute_cypher" and tool_status == "ok":
+            history_item["user_question"] = self._extract_latest_user_message(messages[:-1])
             state["_latest_rows"] = list(tool_result.get("rows", []))
-            graph_delta = self._graph_delta_from_cypher(tool_args.get("cypher"))
+            graph_delta = self._graph_delta_from_cypher(visible_tool_args.get("cypher"))
             history_item["graph_delta"] = graph_delta
             state["_latest_graph_delta"] = graph_delta
         state["toolHistory"] = list(state.get("toolHistory", [])) + [history_item]
@@ -639,7 +668,7 @@ class KGQAAgent:
 
         event_bundle = [
             {"type": "TOOL_CALL_START", "toolCallId": tool_call_id, "toolCallName": tool_name, "parentMessageId": tool_parent_message_id, "timestamp": time.time()},
-            {"type": "TOOL_CALL_ARGS", "toolCallId": tool_call_id, "delta": json.dumps(tool_args, ensure_ascii=False), "timestamp": time.time()},
+            {"type": "TOOL_CALL_ARGS", "toolCallId": tool_call_id, "delta": json.dumps(visible_tool_args, ensure_ascii=False), "timestamp": time.time()},
             {"type": "TOOL_CALL_END", "toolCallId": tool_call_id, "timestamp": time.time()},
             {"type": "TOOL_CALL_RESULT", "messageId": tool_result_message_id, "toolCallId": tool_call_id, "content": result_text, "role": "tool", "timestamp": time.time()},
             {"type": "STATE_SNAPSHOT", "snapshot": clean_state, "timestamp": time.time()},
@@ -753,17 +782,30 @@ class KGQAAgent:
                 "fuzzy_matches": list(value.get("fuzzy_matches", []))[:5],
                 "hint": value.get("hint"),
             }
+        if tool_name == "inspect_recent_executions":
+            executions = value.get("executions", [])
+            return {
+                "status": "ok",
+                "executions": list(executions) if isinstance(executions, list) else [],
+            }
+        if tool_name == "diagnose_error":
+            return {
+                "status": "ok",
+                "value": value,
+            }
         if tool_name == "execute_cypher":
             rows = list(value.get("rows", []))
             row_count = int(value.get("row_count", len(rows)))
             columns = list(rows[0].keys()) if rows else []
-            preview_limit = min(len(rows), 20)
+            preview_limit = min(len(rows), self.FULL_ROWS_HISTORY_LIMIT)
             result: dict[str, Any] = {
                 "status": "ok",
                 "row_count": row_count,
                 "columns": columns,
                 "rows_preview": rows[:preview_limit],
             }
+            if row_count <= self.FULL_ROWS_HISTORY_LIMIT:
+                result["rows"] = rows
             if row_count > preview_limit:
                 result["note"] = (
                     f"共 {row_count} 行，此处仅展示前 {preview_limit} 行预览。"
@@ -787,6 +829,8 @@ class KGQAAgent:
             return "请参考 schema 中的实体、关系和属性名修正查询；必要时可调用 diagnose_error。"
         if tool_name == "list_domain_values":
             return "如果已经拿到完整枚举值，不要重复调用相同的 list_domain_values；下一步应改用 match_value、validate_cypher，或指定更窄的 Entity.field。"
+        if tool_name == "inspect_recent_executions":
+            return "最近执行记录刚刚已经查看过，请基于其中的 Cypher 和结果摘要继续构造查询。"
         return None
 
     def _validate_decision(self, decision: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:

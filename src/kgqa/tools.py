@@ -75,6 +75,14 @@ class KGQAToolbox:
                 "args_schema": {"entity": "string", "field": "string", "keyword": "string"},
             },
             {
+                "name": "inspect_recent_executions",
+                "description": (
+                    "读取当前会话最近几次成功的 execute_cypher 记录，返回对应的用户问题、Cypher 和结果摘要。"
+                    "当当前问题依赖前序查询的约束、排序或结果集合时，先调用它，不要只根据自然语言回答猜测约束。"
+                ),
+                "args_schema": {"limit": "integer | null"},
+            },
+            {
                 "name": "validate_cypher",
                 "description": (
                     "校验生成的 Cypher 是否只读、是否符合当前 schema，"
@@ -126,6 +134,40 @@ class KGQAToolbox:
 
     def match_value(self, entity: str, field: str, keyword: str) -> dict[str, Any]:
         return self.domain.match_value(entity, field, keyword)
+
+    def inspect_recent_executions(
+        self,
+        limit: int | None = None,
+        tool_history: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        history = tool_history if isinstance(tool_history, list) else []
+        max_items = max(1, int(limit or 3))
+        executions: list[dict[str, Any]] = []
+
+        for item in reversed(history):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("tool_name", "")) != "execute_cypher":
+                continue
+            if str(item.get("status", "")) != "ok":
+                continue
+
+            tool_args = item.get("tool_args", {}) if isinstance(item.get("tool_args"), dict) else {}
+            tool_result = item.get("tool_result", {}) if isinstance(item.get("tool_result"), dict) else {}
+            execution: dict[str, Any] = {
+                "user_question": item.get("user_question"),
+                "cypher": tool_args.get("cypher"),
+                "row_count": tool_result.get("row_count"),
+                "columns": tool_result.get("columns", []),
+                "rows_preview": tool_result.get("rows_preview", []),
+            }
+            if isinstance(tool_result.get("rows"), list):
+                execution["rows"] = tool_result.get("rows")
+            executions.append(execution)
+            if len(executions) >= max_items:
+                break
+
+        return {"status": "ok", "executions": executions}
 
     def validate_cypher(self, cypher: str) -> dict[str, Any]:
         try:

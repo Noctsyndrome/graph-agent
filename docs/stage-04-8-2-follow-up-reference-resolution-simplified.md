@@ -134,11 +134,106 @@ Phase 1 暂不引入按引用 ID 读取单条结果的能力。`inspect_recent_e
 
 ---
 
+## 工具结果注入机制（实施关键）
+
+`inspect_recent_executions` 的结果必须经过两处代码改动才能对 agent 可见，缺一不可。
+
+### 背景：现有 observation 流转路径
+
+工具调用结果经由以下路径注入 agent 的 prompt：
+
+1. 工具原始返回 → `_summarize_observation(tool_name, result, status)`
+2. 摘要存入 `observations` 列表
+3. `_build_user_prompt` Section 5 对摘要应用 compact 白名单过滤后渲染
+
+compact 白名单（`agent.py` ~474 行）：
+
+```python
+(“status”, “error”, “hint”, “row_count”, “columns”, “rows_preview”,
+ “note”, “exact_match”, “fuzzy_matches”, “value”)
+```
+
+不在白名单内的字段会被丢弃。若摘要为空 dict，则保留原始摘要（不过滤）。
+
+### 现有各工具的实际可见内容
+
+| 工具 | agent 实际看到 |
+|---|---|
+| `get_schema_context` | `{status}` — 内容经 system prompt 另行注入，observations 中只剩 status |
+| `list_domain_values` | `{status, value}` — 完整枚举摘要 |
+| `match_value` | `{status, exact_match, fuzzy_matches, hint}` |
+| `validate_cypher`（成功） | `{status, value: {valid, cypher}}` — cypher 完整可见 |
+| `validate_cypher`（失败） | `{status, error, hint}` |
+| `execute_cypher`（成功） | `{status, row_count, columns, rows_preview, note}` — 专项处理，完整保留 |
+| `execute_cypher`（失败） | `{status, error, hint}` |
+| `diagnose_error` | 短结果：`{status, value}`；长结果：`{status}` — summary 被白名单丢弃 ⚠️ |
+| `format_results` | `{status}` — 内容由 formatted_result 另存，状态栏显示”已有格式化结果: 是” |
+
+### `inspect_recent_executions` 不做特殊处理时的问题
+
+若不做修改，`inspect_recent_executions` 会走 fallthrough 路径：
+
+- 3 条执行记录（Cypher + rows_preview）的 JSON 通常远超 1200 字符
+- `_summarize_observation` 截断为 `{status: “ok”, summary: “...”}`
+- compact 过滤丢弃 `summary` → agent 只看到 `{status: “ok”}`
+
+工具调了等于没调。
+
+### 需要的两处代码修改
+
+**修改 1：`_summarize_observation` 增加专项处理**
+
+参考 `execute_cypher` 的写法，在 `agent.py` 的 `_summarize_observation` 方法中新增：
+
+```python
+if tool_name == “inspect_recent_executions”:
+    return {
+        “status”: “ok”,
+        “executions”: value.get(“executions”, []),
+    }
+```
+
+跳过通用截断路径，直接将结构化 executions 列表存入摘要。
+
+**修改 2：compact 白名单加入 `executions`**
+
+在 `_build_user_prompt` ~474 行的白名单 tuple 中追加：
+
+```python
+if k in (...现有字段..., “executions”)
+```
+
+`executions` 字段才能通过过滤，完整出现在 Section 5。
+
+### 附：`diagnose_error` 的已知问题
+
+`diagnose_error` 在返回内容较长时，`summary` 字段同样会被 compact 过滤丢弃，agent 只能看到 `{status: “ok”}`，修复建议完全不可见。建议在本阶段一并修复，将 `diagnose_error` 也加入 `_summarize_observation` 的专项处理，或将其返回结构限制在 1200 字符以内。
+
+---
+
 ## Prompt 规则
 
-本阶段在 agent prompt 中增加以下稳定规则：
+### 系统 prompt（`_build_system_prompt`）
 
-> 当前问题若依赖前序查询的范围、约束或结果集合（例如”这几个”、”上面的结果”、”其中”），先调用 `inspect_recent_executions`，基于返回的真实 Cypher 构造新查询，而不是从自然语言回答文本中猜测约束。
+在阶段 1（理解）末尾追加，置于”如果问题是纯统计/排序/Top N 可跳过此阶段”之前：
+
+> 如果当前问题引用了前序查询的结果（如”这几个”、”上面的”、”其中”、”这些”等），在进入阶段 2 之前先调用 `inspect_recent_executions`，从返回的真实 Cypher 还原前序约束，再在此基础上构造新查询。不得仅凭对话历史文本中的自然语言回答推断前序约束。
+
+### 用户 prompt（`_build_user_prompt`）
+
+将 Section 2 的对话历史标题从：
+
+```
+## 对话历史（追问时必须延续前文的查询范围和约束条件）
+```
+
+改为：
+
+```
+## 对话历史（仅供语境参考；前序查询的具体约束须通过 inspect_recent_executions 获取，不可从此处文本猜测）
+```
+
+原标题容易引导 LLM 从自然语言 transcript 中猜约束，这正是范围扩散的根源。改后明确区分两件事：对话历史提供语境，Cypher 约束由工具提供。
 
 ---
 
@@ -195,6 +290,14 @@ Cypher 复用不足的场景是：结果集本身是动态排名的边界（如 
 
 - 先不重新发明一套 `turn artifact`
 - 先直接把现有 `toolHistory` 变成 agent 可按需读取的执行记忆
-- 只补最小必要的 `result_ref` 和小结果集完整 rows 持久化
+- 只补最小必要的用户问题关联和小结果集完整 rows 持久化
+
+实施时必须同步完成的配套改动：
+
+1. `_summarize_observation` 为 `inspect_recent_executions` 增加专项处理
+2. compact 白名单加入 `executions` 字段
+3. 用户 prompt 对话历史标题调整语义
+4. 系统 prompt 阶段 1 补充调用规则
+5. （建议顺带）修复 `diagnose_error` 长结果被截断的问题
 
 这样改动最小，也最贴近当前代码基线。
