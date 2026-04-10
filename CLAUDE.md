@@ -63,7 +63,16 @@ npm run build
 
 - Core agent: `src/kgqa/agent.py`
 - The agent runs a bounded ReAct-style loop and records tool execution history in `state["toolHistory"]`
-- `format_results` remains the normal last tool before answer synthesis
+- The normal query path is:
+  - `get_schema_context`
+  - optional `inspect_recent_executions`
+  - `plan_query`
+  - `validate_cypher`
+  - `execute_cypher`
+  - `format_results`
+- `plan_query` is required before the first `validate_cypher` in each turn
+- `plan_query` may return `needs_clarification = true`; in that case the turn ends with a clarification prompt instead of executing Cypher
+- `inspect_recent_executions` is only for reading prior successful execution history; it is optional and not a mandatory precursor to `plan_query`
 - Public session state is filtered by `_public_state()` before persistence; internal fields such as `_latest_rows`, `_latest_graph_delta`, and `_budget` are excluded
 
 ### Tool chain
@@ -72,9 +81,11 @@ Primary tools live in `src/kgqa/tools.py`:
 
 1. `get_schema_context`
 2. `list_domain_values`
-3. `validate_cypher`
-4. `execute_cypher`
-5. `format_results`
+3. `inspect_recent_executions`
+4. `plan_query`
+5. `validate_cypher`
+6. `execute_cypher`
+7. `format_results`
 
 Cypher execution is read-only and validated before execution.
 
@@ -106,6 +117,7 @@ Each scenario carries its own dataset name, schema file, seed file, and evaluati
 - Server shutdown closes the SQLite connection
 - `POST /seed/load` clears sessions for the loaded scenario
 - Individual sessions can be deleted through `DELETE /chat/{session_id}`
+- `toolHistory` persists recent tool observations, including `plan_query` and successful execution records used by follow-up turns
 
 ## Current API Surface
 

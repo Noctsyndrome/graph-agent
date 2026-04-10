@@ -219,6 +219,7 @@ def test_aux_tools_do_not_consume_main_budget(monkeypatch) -> None:
             {"action": "call_tool", "tool_name": "get_schema_context", "tool_args": {"question": "q"}, "auto_finish_after_format": False},
             {"action": "call_tool", "tool_name": "match_value", "tool_args": {"entity": "Category", "field": "name", "keyword": "客梯"}, "auto_finish_after_format": False},
             {"action": "call_tool", "tool_name": "diagnose_error", "tool_args": {"cypher": "MATCH (m:Model) RETURN m", "error": "Property 'cooling_kw' does not exist on node with label 'Model'"}, "auto_finish_after_format": False},
+            {"action": "call_tool", "tool_name": "plan_query", "tool_args": {"question": "奥的斯的客梯有哪些", "description": "用户要查询奥的斯乘客电梯的型号列表。"}, "auto_finish_after_format": False},
             {"action": "call_tool", "tool_name": "validate_cypher", "tool_args": {"cypher": "MATCH (m:Model {dataset: 'elevator_poc'}) RETURN m.name AS name"}, "auto_finish_after_format": False},
             {"action": "call_tool", "tool_name": "execute_cypher", "tool_args": {"cypher": "MATCH (m:Model {dataset: 'elevator_poc'}) RETURN m.name AS name"}, "auto_finish_after_format": False},
             {"action": "call_tool", "tool_name": "format_results", "tool_args": {"question": "q", "rows": [{"name": "MONOSPACE-1200"}]}, "auto_finish_after_format": True},
@@ -228,9 +229,16 @@ def test_aux_tools_do_not_consume_main_budget(monkeypatch) -> None:
     monkeypatch.setattr(agent, "_decide_next_action", lambda *args, **kwargs: next(decisions))
 
     def _fake_run_tool(thread_id, messages, state, tool_name, tool_args):  # type: ignore[no-untyped-def]
-        if tool_name == "execute_cypher":
+        if tool_name == "plan_query":
+            state["_current_turn_plan_query"] = True
+            state["_current_turn_plan_description"] = tool_args["description"]
+            result = {"status": "ok", "description": tool_args["description"]}
+        elif tool_name == "execute_cypher":
             state["_latest_rows"] = [{"name": "MONOSPACE-1200"}]
             result = {"status": "ok", "row_count": 1, "rows": [{"name": "MONOSPACE-1200"}]}
+        elif tool_name == "validate_cypher":
+            state["_current_turn_validate_ok"] = True
+            result = {"status": "ok", "valid": True, "cypher": tool_args["cypher"]}
         elif tool_name == "format_results":
             result = {"renderer": "table", "payload": [{"name": "MONOSPACE-1200"}], "markdown": "| name |\n| --- |\n| MONOSPACE-1200 |", "row_count": 1, "format": "table", "preview": [{"name": "MONOSPACE-1200"}]}
         else:
@@ -348,17 +356,23 @@ def test_schema_context_is_auto_injected_before_first_tool(monkeypatch) -> None:
         tool_order.append(tool_name)
         if tool_name == "get_schema_context":
             return {"schema_context": "## Schema\n...", "summary": {}}, "ok", messages, state
+        if tool_name == "plan_query":
+            state["_current_turn_plan_query"] = True
+            state["_current_turn_plan_description"] = tool_args["description"]
+            return {"status": "ok", "description": tool_args["description"]}, "ok", messages, state
         if tool_name == "format_results":
             return {"renderer": "table", "payload": [{"count": 1}], "markdown": "| count |\n| --- |\n| 1 |", "row_count": 1, "format": "table", "preview": [{"count": 1}]}, "ok", messages, state
         if tool_name == "execute_cypher":
             state["_latest_rows"] = [{"count": 1}]
             return {"status": "ok", "row_count": 1, "rows": [{"count": 1}]}, "ok", messages, state
         if tool_name == "validate_cypher":
+            state["_current_turn_validate_ok"] = True
             return {"status": "ok", "valid": True, "cypher": tool_args["cypher"]}, "ok", messages, state
         return {"status": "ok"}, "ok", messages, state
 
     decisions = iter(
         [
+            {"action": "call_tool", "tool_name": "plan_query", "tool_args": {"question": "日立有几个型号的乘客电梯？", "description": "用户要查询日立乘客电梯的型号数量。"}, "auto_finish_after_format": False},
             {"action": "call_tool", "tool_name": "validate_cypher", "tool_args": {"cypher": "MATCH (m:Model {dataset: 'elevator_poc'}) RETURN count(m) AS count"}, "auto_finish_after_format": False},
             {"action": "call_tool", "tool_name": "execute_cypher", "tool_args": {"cypher": "MATCH (m:Model {dataset: 'elevator_poc'}) RETURN count(m) AS count"}, "auto_finish_after_format": False},
             {"action": "call_tool", "tool_name": "format_results", "tool_args": {"question": "日立有几个型号的乘客电梯？", "rows": [{"count": 1}]}, "auto_finish_after_format": True},
@@ -382,7 +396,8 @@ def test_schema_context_is_auto_injected_before_first_tool(monkeypatch) -> None:
     # Schema context should be auto-injected as the first tool call (pre-step)
     assert tool_order[0] == "get_schema_context"
     # LLM-decided tools follow after
-    assert tool_order[1] == "validate_cypher"
+    assert tool_order[1] == "plan_query"
+    assert tool_order[2] == "validate_cypher"
 
 
 def test_execute_cypher_graph_delta_is_persisted_and_emitted(monkeypatch) -> None:
@@ -402,6 +417,15 @@ def test_execute_cypher_graph_delta_is_persisted_and_emitted(monkeypatch) -> Non
     agent = KGQAAgent(build_scenario_settings(settings, scenario), scenario)
     decisions = iter(
         [
+            {
+                "action": "call_tool",
+                "tool_name": "plan_query",
+                "tool_args": {
+                    "question": "深圳万象城有哪些铺位？",
+                    "description": "用户要查询深圳万象城关联的铺位列表。",
+                },
+                "auto_finish_after_format": False,
+            },
             {
                 "action": "call_tool",
                 "tool_name": "validate_cypher",
@@ -441,6 +465,8 @@ def test_execute_cypher_graph_delta_is_persisted_and_emitted(monkeypatch) -> Non
     def _fake_invoke(tool_name, tool_args):  # type: ignore[no-untyped-def]
         if tool_name == "get_schema_context":
             return {"schema_context": "## Schema\n...", "summary": {"dataset": "property_ops"}}
+        if tool_name == "plan_query":
+            return {"status": "ok", "description": tool_args["description"]}
         if tool_name == "validate_cypher":
             return {"status": "ok", "valid": True, "cypher": tool_args["cypher"]}
         if tool_name == "execute_cypher":

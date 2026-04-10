@@ -83,6 +83,14 @@ class KGQAToolbox:
                 "args_schema": {"limit": "integer | null"},
             },
             {
+                "name": "plan_query",
+                "description": (
+                    "在构造 Cypher 前，用自然语言明确当前问题的图语义理解，包括目标实体、路径、约束和歧义处理。"
+                    "needs_clarification：若问题存在无法从上下文和 schema 消解的结构性歧义，设为 true；否则设为 false。"
+                ),
+                "args_schema": {"question": "string", "description": "string", "needs_clarification": "boolean | null"},
+            },
+            {
                 "name": "validate_cypher",
                 "description": (
                     "校验生成的 Cypher 是否只读、是否符合当前 schema，"
@@ -168,6 +176,14 @@ class KGQAToolbox:
                 break
 
         return {"status": "ok", "executions": executions}
+
+    def plan_query(self, question: str, description: str, needs_clarification: bool = False) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "question": question,
+            "description": description,
+            "needs_clarification": bool(needs_clarification),
+        }
 
     def validate_cypher(self, cypher: str) -> dict[str, Any]:
         try:

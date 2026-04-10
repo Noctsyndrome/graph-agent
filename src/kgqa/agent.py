@@ -53,9 +53,9 @@ def close_all_kgqa_agents() -> None:
 
 
 class KGQAAgent:
-    AUX_TOOLS = {"get_schema_context", "list_domain_values", "match_value", "diagnose_error", "inspect_recent_executions"}
+    AUX_TOOLS = {"get_schema_context", "list_domain_values", "match_value", "diagnose_error", "inspect_recent_executions", "plan_query"}
     MAIN_TOOLS = {"validate_cypher", "execute_cypher", "format_results"}
-    AUX_BUDGET = 4
+    AUX_BUDGET = 5
     MAIN_BUDGET = 8
     MAX_TOTAL_TURNS = AUX_BUDGET + MAIN_BUDGET + 4
     FULL_ROWS_HISTORY_LIMIT = 20
@@ -78,6 +78,10 @@ class KGQAAgent:
         state = deepcopy(request.state)
         state.setdefault("toolHistory", [])
         state.setdefault("_budget", {"aux_remaining": self.AUX_BUDGET, "main_remaining": self.MAIN_BUDGET})
+        state["_current_turn_plan_query"] = False
+        state["_current_turn_plan_description"] = None
+        state["_clarify_pending"] = None
+        state["_current_turn_validate_ok"] = False
         session_scenario_id = request.scenarioId or self.scenario_id
         upsert_session(
             thread_id,
@@ -202,7 +206,7 @@ class KGQAAgent:
                     continue
 
                 if decision.get("action") == "finish":
-                    if formatted_result is None and state.get("_latest_rows") is None:
+                    if formatted_result is None and state.get("_latest_rows") is None and not state.get("_clarify_pending"):
                         issue = self._decision_error(
                             code="finish_without_result",
                             message="当前还没有稳定结果，不能直接 finish。",
@@ -357,6 +361,17 @@ class KGQAAgent:
                 }
             if formatted_result is not None:
                 return {"thought": "已有最终结构化结果。", "action": "finish", "final_answer": None}
+            if not state.get("_current_turn_plan_query"):
+                return {
+                    "thought": "需要先明确查询意图。",
+                    "action": "call_tool",
+                    "tool_name": "plan_query",
+                    "tool_args": {
+                        "question": question,
+                        "description": f"需要先明确问题“{question}”在当前图谱中的实体、路径和约束。",
+                    },
+                    "auto_finish_after_format": False,
+                }
             return {
                 "thought": "需要读取领域枚举值。",
                 "action": "call_tool",
@@ -395,7 +410,7 @@ class KGQAAgent:
             f"- 实体: {', '.join(schema_entities)}\n"
             f"- 关系: {'; '.join(schema_relationships)}\n\n"
             "# 工作流（必须按阶段推进）\n"
-            "你的每一步决策必须遵循以下三阶段顺序，不可跳过前置阶段：\n\n"
+            "你的每一步决策必须遵循以下四阶段顺序，不可跳过前置阶段：\n\n"
             "## 阶段 1：理解（Understand）\n"
             "目标：确保你已掌握图谱结构和相关枚举值。\n"
             "- schema context 已在会话开始时自动注入，通常不需要再次调用 get_schema_context。\n"
@@ -403,6 +418,15 @@ class KGQAAgent:
             "- 如果需要浏览某实体某字段的所有可选值，调用 list_domain_values(kind='Entity.field')。\n"
             "- 如果当前问题引用了前序查询的结果（如“这几个”“上面的”“其中”“这些”等），在进入阶段 2 前先调用 inspect_recent_executions，从真实 Cypher 还原前序约束；不得仅凭对话历史文本中的自然语言回答推断约束。\n"
             "- 如果问题是纯统计/排序/Top N 且不涉及模糊值，可以跳过此阶段。\n\n"
+            "## 阶段 1.5：解析（Parse）\n"
+            "目标：在构造 Cypher 之前，先用自然语言明确查询意图。\n"
+            "- 每个问题在第一次调用 validate_cypher 之前，必须先调用 plan_query。\n"
+            "- plan_query 应基于当前 schema 和当前问题生成意图描述；若此前已调用 inspect_recent_executions，其结果已在上下文中可见，可一并纳入；inspect_recent_executions 不是 plan_query 的必要前置，两者相互独立。\n"
+            "- plan_query 用充实的自然语言描述：目标实体类型、图遍历路径、过滤约束、以及任何歧义的处理方式。\n"
+            "- 若 plan_query 返回 needs_clarification = true，直接 finish；\n"
+            "  final_answer 基于 description 改写为用户可读的澄清问题（含候选选项），不得包含图路径、实体类型等技术细节。\n"
+            "- 若 plan_query 返回 needs_clarification = false，基于 description 中明确的路径和约束构造 Cypher；\n"
+            "  若 description 中存在假设，在 final_answer 开头附带一句简短的理解说明。\n\n"
             "## 阶段 2：查询（Query）\n"
             "目标：生成正确的 Cypher 并执行。\n"
             "- 先 validate_cypher，通过后再 execute_cypher。绝不可跳过 validate。\n"
@@ -417,8 +441,11 @@ class KGQAAgent:
             "- 没有 rows 时不可 finish。\n\n"
             "# 禁止行为\n"
             "- 禁止在没有 schema context 的情况下调用 validate_cypher 或 execute_cypher。\n"
+            "- 禁止在未调用 plan_query 的情况下直接调用 validate_cypher。\n"
+            "- 禁止在 plan_query 返回 needs_clarification = true 时继续执行查询。\n"
             "- 禁止跳过 validate_cypher 直接 execute_cypher。\n"
             "- 禁止在没有成功的 execute_cypher 结果时 finish。\n"
+            "- 禁止静默返回空结果而不说明理解依据。\n"
             "- 禁止连续两次用完全相同的参数调用同一个辅助工具。\n"
         )
 
@@ -491,6 +518,8 @@ class KGQAAgent:
                             "fuzzy_matches",
                             "value",
                             "executions",
+                            "description",
+                            "needs_clarification",
                         )
                     }
                     if compact:
@@ -542,6 +571,8 @@ class KGQAAgent:
         """Determine which workflow phase the agent is in based on history."""
         if formatted_result is not None:
             return "阶段 3（呈现）— 已有格式化结果，应 finish。"
+        if state.get("_clarify_pending"):
+            return "阶段 1.5（解析）— 已生成需要澄清的候选解读，应 finish。"
         if state.get("_latest_rows") is not None:
             return "阶段 3（呈现）— 已有查询结果，应调用 format_results。"
 
@@ -559,6 +590,13 @@ class KGQAAgent:
         if has_successful_validate:
             return "阶段 2（查询）— 已通过校验，应调用 execute_cypher。"
 
+        has_successful_plan_query = any(
+            obs.get("tool_name") == "plan_query" and obs.get("status") == "ok"
+            for obs in observations
+        )
+        if has_successful_plan_query:
+            return "阶段 2（查询）— 已完成意图解析，应调用 validate_cypher。"
+
         has_schema = any(
             obs.get("tool_name") == "get_schema_context" and obs.get("status") == "ok"
             for obs in observations
@@ -568,7 +606,7 @@ class KGQAAgent:
             for obs in observations
         )
         if has_schema and not has_any_query_attempt:
-            return "阶段 1→2（理解→查询）— 已有 schema，如需确认枚举值可用 match_value/list_domain_values，否则进入 validate_cypher。"
+            return "阶段 1.5（解析）— 已有 schema，如需前序约束可先 inspect_recent_executions，然后调用 plan_query。"
 
         if has_any_query_attempt:
             last_error = None
@@ -661,6 +699,14 @@ class KGQAAgent:
             graph_delta = self._graph_delta_from_cypher(visible_tool_args.get("cypher"))
             history_item["graph_delta"] = graph_delta
             state["_latest_graph_delta"] = graph_delta
+        if tool_name == "validate_cypher":
+            state["_current_turn_validate_ok"] = tool_status == "ok"
+        if tool_name == "plan_query" and tool_status == "ok":
+            description = str(tool_result.get("description", "")).strip()
+            state["_current_turn_plan_query"] = True
+            state["_current_turn_plan_description"] = description
+            if bool(tool_result.get("needs_clarification", False)):
+                state["_clarify_pending"] = description
         state["toolHistory"] = list(state.get("toolHistory", [])) + [history_item]
         if tool_name == "format_results" and tool_status == "ok":
             state["latestResult"] = tool_result
@@ -748,7 +794,17 @@ class KGQAAgent:
         return {
             key: value
             for key, value in state.items()
-            if key not in {"_event_buffer", "_latest_rows", "_latest_graph_delta", "_budget"}
+            if key
+            not in {
+                "_event_buffer",
+                "_latest_rows",
+                "_latest_graph_delta",
+                "_budget",
+                "_current_turn_plan_query",
+                "_current_turn_plan_description",
+                "_clarify_pending",
+                "_current_turn_validate_ok",
+            }
         }
 
     def _graph_delta_from_cypher(self, cypher: Any) -> dict[str, Any]:
@@ -787,6 +843,12 @@ class KGQAAgent:
             return {
                 "status": "ok",
                 "executions": list(executions) if isinstance(executions, list) else [],
+            }
+        if tool_name == "plan_query":
+            return {
+                "status": "ok",
+                "description": str(value.get("description", "")),
+                "needs_clarification": bool(value.get("needs_clarification", False)),
             }
         if tool_name == "diagnose_error":
             return {
@@ -831,6 +893,8 @@ class KGQAAgent:
             return "如果已经拿到完整枚举值，不要重复调用相同的 list_domain_values；下一步应改用 match_value、validate_cypher，或指定更窄的 Entity.field。"
         if tool_name == "inspect_recent_executions":
             return "最近执行记录刚刚已经查看过，请基于其中的 Cypher 和结果摘要继续构造查询。"
+        if tool_name == "plan_query":
+            return "当前问题的查询意图刚刚已经解析过，请基于 description 构造 Cypher 或直接澄清。"
         return None
 
     def _validate_decision(self, decision: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:
@@ -851,6 +915,27 @@ class KGQAAgent:
                 message=f"LLM 选择了未知工具: {tool_name or '<empty>'}",
                 decision=decision,
                 hint=f"请从这些工具中选择: {', '.join(tool_specs)}。",
+            )
+        if state.get("_clarify_pending") and tool_name != "plan_query":
+            return self._decision_error(
+                code="clarify_requires_finish",
+                message="plan_query 已给出需要澄清的候选解读，当前不能继续调用查询工具。",
+                decision=decision,
+                hint="请直接 finish，并将 CLARIFY 描述作为 final_answer 返回给用户。",
+            )
+        if tool_name == "validate_cypher" and not bool(state.get("_current_turn_plan_query")):
+            return self._decision_error(
+                code="missing_plan_query",
+                message="调用 validate_cypher 之前必须先调用 plan_query。",
+                decision=decision,
+                hint="请先调用 plan_query，用自然语言明确目标实体、图路径、过滤约束和歧义处理。",
+            )
+        if tool_name == "execute_cypher" and not bool(state.get("_current_turn_validate_ok")):
+            return self._decision_error(
+                code="missing_validate_cypher",
+                message="调用 execute_cypher 之前必须先成功执行 validate_cypher。",
+                decision=decision,
+                hint="请先调用 validate_cypher；如果 validate 失败，先修正 Cypher 再重试。",
             )
         tool_args = decision.get("tool_args") or {}
         if not isinstance(tool_args, dict):

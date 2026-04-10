@@ -1,11 +1,6 @@
 # kg-qa-poc
 
-知识图谱智能问答演示验证项目。当前仓库已经切换到 **agent-only** 基线：
-
-- FastAPI 自研 Agent 与图谱工具链
-- `/chat` 流式会话接口与会话恢复
-- Vite/React + assistant-ui 前端演示页面
-- Neo4j 种子数据生成、导入与最小自动化验证
+知识图谱智能问答演示验证项目，包含 FastAPI 后端、Neo4j 图数据库和 Vite/React 前端。
 
 ## 1. 环境准备
 
@@ -54,6 +49,8 @@ python scripts/load_seed_data.py
 
 ```powershell
 python -m kgqa.cli seed-load
+python -m kgqa.cli seed-load --scenario elevator
+python -m kgqa.cli seed-load --scenario property
 ```
 
 ## 5. 启动本地服务
@@ -99,37 +96,29 @@ npm run dev -- --host 127.0.0.1 --port 5173
 
 默认读取 `VITE_KGQA_API_BASE_URL`，未配置时访问 `http://127.0.0.1:8000`。
 
-## 7. 当前接口
-
-- `GET /health`
-- `GET /llm/status`
-- `GET /schema`
-- `GET /examples`
-- `POST /seed/load`
-- `GET /chat/sessions`
-- `GET /chat/{session_id}/messages`
-- `POST /chat`
-
-## 8. CLI
+## 7. 常用 CLI 命令
 
 ```powershell
 python -m kgqa.cli seed-load
+python -m kgqa.cli seed-load --scenario elevator
+python -m kgqa.cli seed-load --scenario property
 python -m kgqa.cli eval-run
+python -m kgqa.cli eval-run --scenario elevator
+python -m kgqa.cli eval-run --scenario property
 ```
 
-## 9. 测试与评估
+## 8. 测试与构建
 
 ```powershell
 pytest
-python eval/run_eval.py
+pytest tests/test_chat_api.py
+pytest tests/test_hardening.py
+python -m kgqa.cli eval-run
 ```
 
-报告输出到 `eval/report.html`。
+前端构建：
 
-## 10. 当前实现说明
-
-- `/chat` 是唯一问答主路径，支持流式回复、工具调用轨迹和会话恢复
-- 前端使用 `Vite + React + assistant-ui`
-- 写操作 Cypher 会被拒绝执行
-- 结构化结果会在右侧详情抽屉中展示
-- 历史 `/query` 与 Streamlit 线路已从运行时移除
+```powershell
+cd frontend
+npm run build
+```
